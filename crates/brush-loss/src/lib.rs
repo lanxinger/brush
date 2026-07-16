@@ -72,25 +72,18 @@ mod kernels {
     const HALO: u32 = 5;
     const SHARED_X: u32 = BLOCK_X + 2 * HALO; // 26
     const SHARED_Y: u32 = BLOCK_Y + 2 * HALO; // 26
-    // The backward kernel's inner blur of an already-blurred quantity widens
-    // the loaded `(pred, gt_eff)` footprint by another HALO on each side, so
-    // the 16x16 tile needs ~28.4 KiB of f32 shared memory — inside Apple's
-    // 32 KiB threadgroup budget. (This tile was temporarily 8x8 while
-    // cubecl-wgpu double-counted declared shared memory and rejected the
-    // launch; that accounting was fixed upstream in cubecl#1367.)
-    pub const BLOCK_X_BWD: u32 = 16;
-    pub const BLOCK_Y_BWD: u32 = 16;
-    const SHARED_X_BWD: u32 = BLOCK_X_BWD + 2 * HALO; // 26
-    const SHARED_Y_BWD: u32 = BLOCK_Y_BWD + 2 * HALO; // 26
-    const EXT_X_BWD: u32 = BLOCK_X_BWD + 4 * HALO; // 36
-    const EXT_Y_BWD: u32 = BLOCK_Y_BWD + 4 * HALO; // 36
-    // Loop trip counts for cooperative loads/stores. Each phase needs at
-    // least `ceil(footprint / threads)` iterations.
-    const THREADS_BWD: u32 = BLOCK_X_BWD * BLOCK_Y_BWD;
-    const LOAD_ITERS_BWD: u32 = (EXT_Y_BWD * EXT_X_BWD).div_ceil(THREADS_BWD); // 6
-    const HBLUR_ITERS_BWD: u32 = (EXT_Y_BWD * SHARED_X_BWD).div_ceil(THREADS_BWD); // 4
-    const PARTIAL_ITERS_BWD: u32 = (SHARED_Y_BWD * SHARED_X_BWD).div_ceil(THREADS_BWD); // 3
-    const INNER_H_PASSES_BWD: u32 = SHARED_Y_BWD.div_ceil(BLOCK_Y_BWD); // 2
+    pub const BWD_TILE_SMALL: u32 = 8;
+    pub const BWD_TILE_LARGE: u32 = 16;
+
+    const fn backward_shared_elements(tile: u32) -> usize {
+        let shared = tile + 2 * HALO;
+        let extended = tile + 4 * HALO;
+        (extended * extended * 2 + extended * shared * 5) as usize
+    }
+
+    /// Shared-memory footprint of the fast 16x16 f32 specialization.
+    pub const BWD_LARGE_SHARED_BYTES: usize =
+        backward_shared_elements(BWD_TILE_LARGE) * size_of::<f32>();
 
     const C1: f32 = 0.01 * 0.01;
     const C2: f32 = 0.03 * 0.03;
@@ -211,11 +204,10 @@ mod kernels {
             terminate!();
         }
 
-        // Tile + halo of (pred, gt_eff_c) interleaved as 2 floats. cubecl's
-        // WGSL backend over-counts shared memory by 2x (it reports double the
-        // bytes actually declared in WGSL), so this kernel has to stay under
-        // ~half the real Apple Metal threadgroup budget. gt_a was previously
-        // carried here too; the mask=true path now re-reads it at the centre.
+        // Tile + halo of (pred, gt_eff_c) interleaved as 2 floats. This
+        // 16x16 forward layout uses about 13.4 KiB of shared memory, below the
+        // WebGPU downlevel limit. gt_a was previously carried here too; the
+        // mask=true path now re-reads it at the centre.
         let mut s_tile = Shared::new_slice((SHARED_Y * SHARED_X * 2) as usize);
         let mut x_conv = Shared::new_slice((SHARED_Y * BLOCK_X * 5) as usize);
 
@@ -360,11 +352,10 @@ mod kernels {
     /// Backward: recompute SSIM partials inline, scatter `dL/dpred` per pixel.
     ///
     /// Each `sync_cube` boundary frees a scratch role, so the four logical
-    /// arrays alias into two physical buffers. Tile is 8x8 (rather than 16x16
-    /// like the forward) because cubecl-wgpu's shared-memory limit check
-    /// reports double the bytes actually declared in WGSL, and the 16x16
-    /// layout's ~28 KiB would trip Apple's 32 KiB threadgroup limit under
-    /// that doubled accounting.
+    /// arrays alias into two physical buffers. The host selects a 16x16 tile
+    /// (29,088 bytes shared memory) when device limits allow it and otherwise
+    /// falls back to 8x8 (16,352 bytes). `tile` is comptime, so both choices
+    /// compile to dedicated kernels with no shader-side branch.
     #[allow(clippy::assign_op_pattern)]
     #[cube(launch)]
     pub fn image_loss_backward_kernel<F: Float>(
@@ -381,10 +372,19 @@ mod kernels {
         bg_b: f32,
         #[comptime] composite: bool,
         #[comptime] mask: bool,
+        #[comptime] tile: u32,
     ) {
+        let shared = comptime![tile + 2u32 * HALO];
+        let extended = comptime![tile + 4u32 * HALO];
+        let threads = comptime![tile * tile];
+        let load_iters = comptime![(extended * extended).div_ceil(threads)];
+        let hblur_iters = comptime![(extended * shared).div_ceil(threads)];
+        let partial_iters = comptime![(shared * shared).div_ceil(threads)];
+        let inner_h_passes = comptime![shared.div_ceil(tile)];
+
         let c = CUBE_POS_Z;
-        let tile_y0 = CUBE_POS_Y * BLOCK_Y_BWD;
-        let tile_x0 = CUBE_POS_X * BLOCK_X_BWD;
+        let tile_y0 = CUBE_POS_Y * tile;
+        let tile_x0 = CUBE_POS_X * tile;
         let pix_y = tile_y0 + UNIT_POS_Y;
         let pix_x = tile_x0 + UNIT_POS_X;
 
@@ -413,8 +413,8 @@ mod kernels {
 
         // buf_a holds the image tile, then chain*partials after the v-blur.
         // buf_b holds the 1st h-blur sums, then the 2nd h-blur sums.
-        let mut buf_a = Shared::new_slice((EXT_Y_BWD * EXT_X_BWD * 2) as usize);
-        let mut buf_b = Shared::new_slice((EXT_Y_BWD * SHARED_X_BWD * 5) as usize);
+        let mut buf_a = Shared::new_slice(comptime![(extended * extended * 2u32) as usize]);
+        let mut buf_b = Shared::new_slice(comptime![(extended * shared * 5u32) as usize]);
 
         let bg_c = if composite {
             if c == 0u32 {
@@ -428,16 +428,16 @@ mod kernels {
             F::cast_from(0.0_f32)
         };
 
-        let thread_rank = UNIT_POS_Y * BLOCK_X_BWD + UNIT_POS_X;
+        let thread_rank = UNIT_POS_Y * tile + UNIT_POS_X;
 
         // Load pred and effective-gt with halo of 2*HALO into buf_a.
-        let ext_size = EXT_Y_BWD * EXT_X_BWD;
+        let ext_size = extended * extended;
         #[unroll]
-        for s in 0u32..LOAD_ITERS_BWD {
-            let tid = s * THREADS_BWD + thread_rank;
+        for s in 0u32..load_iters {
+            let tid = s * threads + thread_rank;
             if tid < ext_size {
-                let local_y = tid / EXT_X_BWD;
-                let local_x = tid % EXT_X_BWD;
+                let local_y = tid / extended;
+                let local_x = tid % extended;
                 let (gy, gx, oob) = coords(tile_y0, tile_x0, local_y, local_x, 2u32 * HALO, h, w);
                 let pv = read_pred::<F>(pred, c, gy, gx, oob, h, w);
                 let (gt_c, gt_a) = read_gt::<F>(gt_packed, c, gy, gx, oob, w);
@@ -446,7 +446,7 @@ mod kernels {
                 } else {
                     gt_c
                 };
-                let base = ((local_y * EXT_X_BWD + local_x) * 2u32) as usize;
+                let base = ((local_y * extended + local_x) * 2u32) as usize;
                 buf_a[base] = pv;
                 buf_a[base + 1] = gt_eff;
             }
@@ -454,13 +454,13 @@ mod kernels {
         sync_cube();
 
         // Horizontal blur over the extended tile.
-        let horiz_size = EXT_Y_BWD * SHARED_X_BWD;
+        let horiz_size = extended * shared;
         #[unroll]
-        for s in 0u32..HBLUR_ITERS_BWD {
-            let tid = s * THREADS_BWD + thread_rank;
+        for s in 0u32..hblur_iters {
+            let tid = s * threads + thread_rank;
             if tid < horiz_size {
-                let row_y = tid / SHARED_X_BWD;
-                let col_x = tid % SHARED_X_BWD;
+                let row_y = tid / shared;
+                let col_x = tid % shared;
                 let center = col_x + HALO;
                 let mut sum_x = F::cast_from(0.0_f32);
                 let mut sum_x2 = F::cast_from(0.0_f32);
@@ -470,8 +470,8 @@ mod kernels {
                 #[unroll]
                 for d in 1u32..6u32 {
                     let w_d = gw::<F>(comptime![5u32 - d]);
-                    let il = ((row_y * EXT_X_BWD + (center - d)) * 2u32) as usize;
-                    let ir = ((row_y * EXT_X_BWD + (center + d)) * 2u32) as usize;
+                    let il = ((row_y * extended + (center - d)) * 2u32) as usize;
+                    let ir = ((row_y * extended + (center + d)) * 2u32) as usize;
                     let xl = buf_a[il];
                     let yl = buf_a[il + 1];
                     let xr = buf_a[ir];
@@ -482,7 +482,7 @@ mod kernels {
                     sum_y2 += (yl * yl + yr * yr) * w_d;
                     sum_xy += (xl * yl + xr * yr) * w_d;
                 }
-                let ic = ((row_y * EXT_X_BWD + center) * 2u32) as usize;
+                let ic = ((row_y * extended + center) * 2u32) as usize;
                 let xc = buf_a[ic];
                 let yc = buf_a[ic + 1];
                 let wc = gw::<F>(5u32);
@@ -491,7 +491,7 @@ mod kernels {
                 sum_y += yc * wc;
                 sum_y2 += yc * yc * wc;
                 sum_xy += xc * yc * wc;
-                let base = ((row_y * SHARED_X_BWD + col_x) * 5u32) as usize;
+                let base = ((row_y * shared + col_x) * 5u32) as usize;
                 buf_b[base] = sum_x;
                 buf_b[base + 1] = sum_x2;
                 buf_b[base + 2] = sum_y;
@@ -503,13 +503,13 @@ mod kernels {
 
         // Vertical blur, derive SSIM partials, multiply by chain * (mask if any).
         // Reuses buf_a (image tile is dead) for chain*partials.
-        let partial_size = SHARED_Y_BWD * SHARED_X_BWD;
+        let partial_size = shared * shared;
         #[unroll]
-        for s in 0u32..PARTIAL_ITERS_BWD {
-            let tid = s * THREADS_BWD + thread_rank;
+        for s in 0u32..partial_iters {
+            let tid = s * threads + thread_rank;
             if tid < partial_size {
-                let part_y = tid / SHARED_X_BWD;
-                let part_x = tid % SHARED_X_BWD;
+                let part_y = tid / shared;
+                let part_x = tid % shared;
                 let center = part_y + HALO;
 
                 let mut out0 = F::cast_from(0.0_f32);
@@ -520,15 +520,15 @@ mod kernels {
                 #[unroll]
                 for d in 1u32..6u32 {
                     let w_d = gw::<F>(comptime![5u32 - d]);
-                    let bt = (((center - d) * SHARED_X_BWD + part_x) * 5u32) as usize;
-                    let bb = (((center + d) * SHARED_X_BWD + part_x) * 5u32) as usize;
+                    let bt = (((center - d) * shared + part_x) * 5u32) as usize;
+                    let bb = (((center + d) * shared + part_x) * 5u32) as usize;
                     out0 += (buf_b[bt] + buf_b[bb]) * w_d;
                     out1 += (buf_b[bt + 1] + buf_b[bb + 1]) * w_d;
                     out2 += (buf_b[bt + 2] + buf_b[bb + 2]) * w_d;
                     out3 += (buf_b[bt + 3] + buf_b[bb + 3]) * w_d;
                     out4 += (buf_b[bt + 4] + buf_b[bb + 4]) * w_d;
                 }
-                let bc = ((center * SHARED_X_BWD + part_x) * 5u32) as usize;
+                let bc = ((center * shared + part_x) * 5u32) as usize;
                 let wc = gw::<F>(5u32);
                 out0 += buf_b[bc] * wc;
                 out1 += buf_b[bc + 1] * wc;
@@ -570,7 +570,7 @@ mod kernels {
                     chain = chain * gt_a;
                 }
 
-                let base = ((part_y * SHARED_X_BWD + part_x) * 3u32) as usize;
+                let base = ((part_y * shared + part_x) * 3u32) as usize;
                 buf_a[base] = dmu1 * chain;
                 buf_a[base + 1] = dsigma1 * chain;
                 buf_a[base + 2] = dsigma12 * chain;
@@ -582,27 +582,27 @@ mod kernels {
         // Reuses buf_b (1st-blur sums are dead) for the inner-blur output.
         let lx_b = UNIT_POS_X + HALO;
         #[unroll]
-        for pass in 0u32..INNER_H_PASSES_BWD {
-            let ly_b = UNIT_POS_Y + pass * BLOCK_Y_BWD;
-            if ly_b < SHARED_Y_BWD {
+        for pass in 0u32..inner_h_passes {
+            let ly_b = UNIT_POS_Y + pass * tile;
+            if ly_b < shared {
                 let mut a0 = F::cast_from(0.0_f32);
                 let mut a1 = F::cast_from(0.0_f32);
                 let mut a2 = F::cast_from(0.0_f32);
                 #[unroll]
                 for d in 1u32..6u32 {
                     let w_d = gw::<F>(comptime![5u32 - d]);
-                    let il = ((ly_b * SHARED_X_BWD + (lx_b - d)) * 3u32) as usize;
-                    let ir = ((ly_b * SHARED_X_BWD + (lx_b + d)) * 3u32) as usize;
+                    let il = ((ly_b * shared + (lx_b - d)) * 3u32) as usize;
+                    let ir = ((ly_b * shared + (lx_b + d)) * 3u32) as usize;
                     a0 += (buf_a[il] + buf_a[ir]) * w_d;
                     a1 += (buf_a[il + 1] + buf_a[ir + 1]) * w_d;
                     a2 += (buf_a[il + 2] + buf_a[ir + 2]) * w_d;
                 }
-                let ic = ((ly_b * SHARED_X_BWD + lx_b) * 3u32) as usize;
+                let ic = ((ly_b * shared + lx_b) * 3u32) as usize;
                 let wc = gw::<F>(5u32);
                 a0 += buf_a[ic] * wc;
                 a1 += buf_a[ic + 1] * wc;
                 a2 += buf_a[ic + 2] * wc;
-                let base = ((ly_b * BLOCK_X_BWD + UNIT_POS_X) * 3u32) as usize;
+                let base = ((ly_b * tile + UNIT_POS_X) * 3u32) as usize;
                 buf_b[base] = a0;
                 buf_b[base + 1] = a1;
                 buf_b[base + 2] = a2;
@@ -620,13 +620,13 @@ mod kernels {
             #[unroll]
             for d in 1u32..6u32 {
                 let w_d = gw::<F>(comptime![5u32 - d]);
-                let bt = (((ly - d) * BLOCK_X_BWD + lx) * 3u32) as usize;
-                let bb = (((ly + d) * BLOCK_X_BWD + lx) * 3u32) as usize;
+                let bt = (((ly - d) * tile + lx) * 3u32) as usize;
+                let bb = (((ly + d) * tile + lx) * 3u32) as usize;
                 s0 += (buf_b[bt] + buf_b[bb]) * w_d;
                 s1 += (buf_b[bt + 1] + buf_b[bb + 1]) * w_d;
                 s2 += (buf_b[bt + 2] + buf_b[bb + 2]) * w_d;
             }
-            let bc = ((ly * BLOCK_X_BWD + lx) * 3u32) as usize;
+            let bc = ((ly * tile + lx) * 3u32) as usize;
             let wc = gw::<F>(5u32);
             s0 += buf_b[bc] * wc;
             s1 += buf_b[bc + 1] * wc;
@@ -806,13 +806,25 @@ fn cube_count_3d(c: u32, h: u32, w: u32) -> burn_cubecl::cubecl::prelude::CubeCo
     )
 }
 
-fn cube_count_3d_bwd(c: u32, h: u32, w: u32) -> burn_cubecl::cubecl::prelude::CubeCount {
+fn cube_count_3d_bwd(c: u32, h: u32, w: u32, tile: u32) -> burn_cubecl::cubecl::prelude::CubeCount {
     use burn_cubecl::cubecl::prelude::CubeCount;
-    CubeCount::Static(
-        w.div_ceil(kernels::BLOCK_X_BWD),
-        h.div_ceil(kernels::BLOCK_Y_BWD),
-        c,
-    )
+    CubeCount::Static(w.div_ceil(tile), h.div_ceil(tile), c)
+}
+
+fn select_backward_tile(
+    max_shared_memory_size: usize,
+    max_units_per_cube: u32,
+    max_cube_dim: (u32, u32, u32),
+) -> u32 {
+    if max_shared_memory_size >= kernels::BWD_LARGE_SHARED_BYTES
+        && max_units_per_cube >= kernels::BWD_TILE_LARGE * kernels::BWD_TILE_LARGE
+        && max_cube_dim.0 >= kernels::BWD_TILE_LARGE
+        && max_cube_dim.1 >= kernels::BWD_TILE_LARGE
+    {
+        kernels::BWD_TILE_LARGE
+    } else {
+        kernels::BWD_TILE_SMALL
+    }
 }
 
 fn launch_image_forward<R: CubeRuntime>(
@@ -868,6 +880,16 @@ fn launch_image_backward<R: CubeRuntime>(
     dl_dmap: CubeTensor<R>,
     cfg: ImageLossConfig,
 ) -> CubeTensor<R> {
+    launch_image_backward_with_tile(pred, gt_packed, dl_dmap, cfg, None)
+}
+
+fn launch_image_backward_with_tile<R: CubeRuntime>(
+    pred: CubeTensor<R>,
+    gt_packed: CubeTensor<R>,
+    dl_dmap: CubeTensor<R>,
+    cfg: ImageLossConfig,
+    tile_override: Option<u32>,
+) -> CubeTensor<R> {
     use burn_cubecl::cubecl::prelude::CubeDim;
 
     let pred = into_contiguous(pred);
@@ -881,11 +903,23 @@ fn launch_image_backward<R: CubeRuntime>(
     let bg = cfg.composite_bg.unwrap_or(Vec3::ZERO);
     let dl_dpred = alloc_zeros(&pred);
     let client = pred.client.clone();
+    let hardware = &client.properties().hardware;
+    let tile = tile_override.unwrap_or_else(|| {
+        select_backward_tile(
+            hardware.max_shared_memory_size,
+            hardware.max_units_per_cube,
+            hardware.max_cube_dim,
+        )
+    });
+    debug_assert!(
+        matches!(tile, kernels::BWD_TILE_SMALL | kernels::BWD_TILE_LARGE),
+        "backward loss tile must be 8 or 16, got {tile}"
+    );
 
     kernels::image_loss_backward_kernel::launch::<f32, R>(
         &client,
-        cube_count_3d_bwd(c, h, w),
-        CubeDim::new_2d(kernels::BLOCK_X_BWD, kernels::BLOCK_Y_BWD),
+        cube_count_3d_bwd(c, h, w, tile),
+        CubeDim::new_2d(tile, tile),
         pred.into_tensor_arg(),
         gt_packed.into_tensor_arg(),
         dl_dmap.into_tensor_arg(),
@@ -899,6 +933,7 @@ fn launch_image_backward<R: CubeRuntime>(
         bg.z,
         composite,
         cfg.mask,
+        tile,
     );
     dl_dpred
 }
@@ -1126,4 +1161,131 @@ pub fn unpack_gt_rgb(gt_packed: Tensor<2, Int>, composite_bg: Option<Vec3>) -> T
     let gt_p = unwrap_wgpu_int(gt_packed);
     let out = <MainBackend as LossOps<MainBackend>>::unpack_gt_rgb(gt_p, composite_bg);
     wrap_wgpu_float(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backward_tile_selection_respects_device_limits() {
+        let large = kernels::BWD_TILE_LARGE;
+        let generous_dims = (large, large, 1);
+        let generous_units = large * large;
+
+        assert_eq!(kernels::BWD_LARGE_SHARED_BYTES, 29_088);
+        assert_eq!(
+            select_backward_tile(29_087, generous_units, generous_dims),
+            kernels::BWD_TILE_SMALL
+        );
+        assert_eq!(
+            select_backward_tile(29_088, generous_units, generous_dims),
+            large
+        );
+        assert_eq!(
+            select_backward_tile(29_088, generous_units - 1, generous_dims),
+            kernels::BWD_TILE_SMALL
+        );
+        assert_eq!(
+            select_backward_tile(29_088, generous_units, (large - 1, large, 1)),
+            kernels::BWD_TILE_SMALL
+        );
+        assert_eq!(
+            select_backward_tile(29_088, generous_units, (large, large - 1, 1)),
+            kernels::BWD_TILE_SMALL
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn backward_tile_specializations_match() {
+        use brush_cube::{CubeTensor, create_tensor_from_slice};
+        use burn::{backend::wgpu::WgpuDevice, tensor::Shape};
+
+        fn shaped_f32(data: &[f32], shape: Shape, device: &WgpuDevice) -> CubeTensor<WgpuRuntime> {
+            let flat = create_tensor_from_slice(data, device, DType::F32);
+            CubeTensor::new_contiguous(flat.client, flat.device, shape, flat.handle, flat.dtype)
+        }
+
+        fn shaped_i32(data: &[i32], shape: Shape, device: &WgpuDevice) -> CubeTensor<WgpuRuntime> {
+            let flat = create_tensor_from_slice(data, device, DType::I32);
+            CubeTensor::new_contiguous(flat.client, flat.device, shape, flat.handle, flat.dtype)
+        }
+
+        let device = brush_cube::test_helpers::test_device().await;
+        let (c, h, w) = (4usize, 17usize, 19usize);
+        let pred: Vec<f32> = (0..c * h * w)
+            .map(|i| 0.1 + ((i * 17 + 3) % 71) as f32 / 100.0)
+            .collect();
+        let chain: Vec<f32> = (0..c * h * w)
+            .map(|i| {
+                let value = 0.2 + ((i * 13 + 5) % 37) as f32 / 50.0;
+                if i % 2 == 0 { value } else { -value }
+            })
+            .collect();
+        let gt: Vec<i32> = (0..h * w)
+            .map(|i| {
+                let r = (30 + (i * 7) % 101) as u32;
+                let g = (70 + (i * 11) % 101) as u32;
+                let b = (110 + (i * 13) % 101) as u32;
+                let a = (100 + (i * 17) % 131) as u32;
+                (r | g << 8 | b << 16 | a << 24) as i32
+            })
+            .collect();
+        let cfg = ImageLossConfig {
+            l1_weight: 0.8,
+            ssim_weight: -0.2,
+            composite_bg: Some(Vec3::new(0.05, 0.1, 0.15)),
+            mask: true,
+        };
+
+        let make_pred = || shaped_f32(&pred, Shape::new([c, h, w]), &device);
+        let make_gt = || shaped_i32(&gt, Shape::new([h, w]), &device);
+        let make_chain = || shaped_f32(&chain, Shape::new([c, h, w]), &device);
+        let small_pred = make_pred();
+        let selected_tile = {
+            let hardware = &small_pred.client.properties().hardware;
+            select_backward_tile(
+                hardware.max_shared_memory_size,
+                hardware.max_units_per_cube,
+                hardware.max_cube_dim,
+            )
+        };
+        let small = launch_image_backward_with_tile(
+            small_pred,
+            make_gt(),
+            make_chain(),
+            cfg,
+            Some(kernels::BWD_TILE_SMALL),
+        );
+        let small: Vec<f32> = burn_cubecl::ops::into_data_sync(small)
+            .to_vec()
+            .expect("small-tile gradient data");
+        assert!(
+            small.iter().all(|value| value.is_finite()),
+            "small-tile gradients must be finite"
+        );
+        if selected_tile != kernels::BWD_TILE_LARGE {
+            return;
+        }
+
+        let large = launch_image_backward_with_tile(
+            make_pred(),
+            make_gt(),
+            make_chain(),
+            cfg,
+            Some(kernels::BWD_TILE_LARGE),
+        );
+        let large: Vec<f32> = burn_cubecl::ops::into_data_sync(large)
+            .to_vec()
+            .expect("large-tile gradient data");
+
+        for (index, (&small, &large)) in small.iter().zip(&large).enumerate() {
+            let tolerance = 5e-5 + 5e-5 * small.abs().max(large.abs());
+            assert!(
+                (small - large).abs() <= tolerance,
+                "tile gradients differ at {index}: 8x8={small}, 16x16={large}, tolerance={tolerance}"
+            );
+        }
+    }
 }

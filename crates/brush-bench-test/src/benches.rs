@@ -221,12 +221,14 @@ mod forward_rendering {
             forward_iters(&splats, &camera, resolution, ITERS_PER_SYNC).await;
             device.sync().expect("Failed to sync");
         });
-        bencher.bench_local(move || {
-            block_on(async {
-                forward_iters(&splats, &camera, resolution, ITERS_PER_SYNC).await;
-                device.sync().expect("Failed to sync");
+        bencher
+            .counter(divan::counter::ItemsCount::new(ITERS_PER_SYNC))
+            .bench_local(move || {
+                block_on(async {
+                    forward_iters(&splats, &camera, resolution, ITERS_PER_SYNC).await;
+                    device.sync().expect("Failed to sync");
+                });
             });
-        });
     }
 
     #[divan::bench(args = SPLAT_COUNTS)]
@@ -258,12 +260,14 @@ mod backward_rendering {
             backward_iters(&splats, &camera, resolution, ITERS_PER_SYNC).await;
             device.sync().expect("Failed to sync");
         });
-        bencher.bench_local(move || {
-            block_on(async {
-                backward_iters(&splats, &camera, resolution, ITERS_PER_SYNC).await;
-                device.sync().expect("Failed to sync");
+        bencher
+            .counter(divan::counter::ItemsCount::new(ITERS_PER_SYNC))
+            .bench_local(move || {
+                block_on(async {
+                    backward_iters(&splats, &camera, resolution, ITERS_PER_SYNC).await;
+                    device.sync().expect("Failed to sync");
+                });
             });
-        });
     }
 
     #[divan::bench(args = [1_000_000, 2_000_000, 5_000_000])]
@@ -278,7 +282,9 @@ mod backward_rendering {
 }
 
 #[cfg(not(target_family = "wasm"))]
-#[divan::bench_group(max_time = 4)]
+// Canonical A/B runs must not override Divan's sample count, sample size, or
+// minimum time; doing so changes the evolving training-step window.
+#[divan::bench_group(sample_count = 10, sample_size = 1)]
 mod training {
     const SPLAT_COUNTS: [usize; 3] = [500_000, 1_000_000, 2_500_000];
 
@@ -286,7 +292,9 @@ mod training {
     use burn_cubecl::cubecl::future::block_on;
     use glam::Vec3;
 
-    use crate::benches::{ITERS_PER_SYNC, gen_splats, generate_training_batch, training_iters};
+    use crate::benches::{
+        ITERS_PER_SYNC, SEED, gen_splats, generate_training_batch, training_iters,
+    };
     use brush_render::bounding_box::BoundingBox;
     use brush_train::{config::TrainConfig, train::SplatTrainer};
 
@@ -297,28 +305,38 @@ mod training {
             generate_training_batch((1920, 1080), Vec3::new(0.0, 0.0, 5.0)),
             generate_training_batch((1920, 1080), Vec3::new(2.0, 0.0, 5.0)),
         ];
-        let config = TrainConfig::default();
+        // CPU background noise uses an unseeded thread RNG. Disable it in the
+        // regression bench so separate builds follow the same input sequence.
+        let config = TrainConfig {
+            background_noise_strength: 0.0,
+            ..TrainConfig::default()
+        };
         let mut trainer = SplatTrainer::new(
             &config,
             &device,
             BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
         );
         let mut splats = Some(gen_splats(&device, splat_count));
+        // Seed CubeCL's RNG used by tensor noise. With one sample iteration
+        // and a fixed sample count, every build consumes the same call window.
+        device.seed(SEED);
         // Warmup also initializes the optimizer state (first-step lazy init).
         block_on(async {
             training_iters(&mut trainer, &mut splats, &batches, 0, ITERS_PER_SYNC).await;
             device.sync().expect("Failed to sync");
         });
-        // Splats keep evolving across samples (no refine runs, so the count
-        // stays fixed); the alternating-batch cadence carries over via `step`.
+        // Splats keep evolving across the fixed ten-sample window (no refine
+        // runs, so the count stays fixed); batch cadence carries via `step`.
         let mut step = ITERS_PER_SYNC as usize;
-        bencher.bench_local(move || {
-            block_on(async {
-                training_iters(&mut trainer, &mut splats, &batches, step, ITERS_PER_SYNC).await;
-                step += ITERS_PER_SYNC as usize;
-                device.sync().expect("Failed to sync");
+        bencher
+            .counter(divan::counter::ItemsCount::new(ITERS_PER_SYNC))
+            .bench_local(move || {
+                block_on(async {
+                    training_iters(&mut trainer, &mut splats, &batches, step, ITERS_PER_SYNC).await;
+                    step += ITERS_PER_SYNC as usize;
+                    device.sync().expect("Failed to sync");
+                });
             });
-        });
     }
 }
 
