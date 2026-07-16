@@ -200,6 +200,10 @@ mod native {
         }
     }
 
+    fn env_enabled(name: &str) -> bool {
+        std::env::var(name).is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    }
+
     #[tokio::main(flavor = "current_thread")]
     pub(super) async fn run() -> Result<()> {
         let args = Args::parse();
@@ -265,15 +269,15 @@ mod native {
         } else {
             "wgsl"
         };
-        let unchecked_raster_requested = std::env::var("BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let unchecked_raster_requested = env_enabled("BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD");
+        let fused_sh_adam_requested = env_enabled("BRUSH_NATIVE_MSL_FUSED_SH_ADAM");
 
         println!("checkpoint: {}", args.ply.display());
         println!("dataset: {}", args.dataset.display());
         println!("splats: {splat_count}");
         println!("views: {} ({})", batches.len(), view_labels.join(", "));
         println!(
-            "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | seed: {}",
+            "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | seed: {}",
             args.seed
         );
         println!(
@@ -285,7 +289,7 @@ mod native {
             1000.0 / median
         );
         println!(
-            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6}",
+            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6}",
             args.seed,
             batches.len(),
             view_labels.join(","),

@@ -12,6 +12,26 @@ use burn::{
     tensor::{Device, ElementConversion, Tensor},
 };
 
+#[cfg(all(
+    feature = "native-msl",
+    target_os = "macos",
+    target_arch = "aarch64",
+    not(target_family = "wasm")
+))]
+fn use_fused_sh_adam() -> bool {
+    use std::sync::OnceLock;
+
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = std::env::var("BRUSH_NATIVE_MSL_FUSED_SH_ADAM")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if enabled {
+            tracing::warn!("experimental native-MSL fused SH Adam enabled");
+        }
+        enabled
+    })
+}
+
 /// Adam with per-parameter second-moment reduction (via [`AdamState::reduce_moment_2`]).
 #[derive(Clone)]
 pub(crate) struct AdamScaled {
@@ -112,6 +132,63 @@ impl SimpleOptimizer for AdamScaled {
 
         if let Some(weight_decay) = &self.weight_decay {
             grad = weight_decay.transform(grad, tensor.clone());
+        }
+
+        #[cfg(all(
+            feature = "native-msl",
+            target_os = "macos",
+            target_arch = "aarch64",
+            not(target_family = "wasm")
+        ))]
+        if use_fused_sh_adam()
+            && reduce
+            && D == 3
+            && let (Some(momentum), Some(scaling)) = (state_momentum.as_ref(), scaling.as_ref())
+        {
+            let shape = tensor.dims();
+            let coeffs = shape[1];
+            let mut reduced_shape = [1usize; D];
+            reduced_shape[0] = shape[0];
+            let mut scaling_shape = [1usize; D];
+            scaling_shape[1] = coeffs;
+            let shapes_match = shape[0] > 0
+                && shape[2] == 3
+                && matches!(coeffs, 1 | 4 | 9 | 16 | 25)
+                && momentum.moment_1.dims() == shape
+                && momentum.moment_2.dims() == reduced_shape
+                && scaling.dims() == scaling_shape;
+            if shapes_match {
+                let next_time = momentum.time + 1;
+                let time = next_time as i32;
+                let config = crate::sh_adam::ShAdamConfig {
+                    beta_1: self.momentum.beta_1,
+                    beta_2: self.momentum.beta_2,
+                    bias_correction_1: 1.0 - self.momentum.beta_1.powi(time),
+                    bias_correction_2: 1.0 - self.momentum.beta_2.powi(time),
+                    epsilon: self.momentum.epsilon,
+                    learning_rate: lr as f32,
+                };
+                let (tensor, moment_1, moment_2) = crate::sh_adam::sh_adam(
+                    tensor.reshape([shape[0], coeffs, 3]),
+                    grad.reshape([shape[0], coeffs, 3]),
+                    momentum.moment_1.clone().reshape([shape[0], coeffs, 3]),
+                    momentum.moment_2.clone().reshape([shape[0], 1, 1]),
+                    scaling.clone().reshape([1, coeffs, 1]),
+                    config,
+                );
+                return (
+                    tensor.reshape(shape),
+                    Some(AdamState {
+                        momentum: Some(MomentumState {
+                            moment_1: moment_1.reshape(shape),
+                            moment_2: moment_2.reshape(reduced_shape),
+                            time: next_time,
+                        }),
+                        scaling: Some(scaling.clone()),
+                        reduce_moment_2: true,
+                    }),
+                );
+            }
         }
 
         let (grad, state_momentum) = self.momentum.transform(&grad, state_momentum, reduce);

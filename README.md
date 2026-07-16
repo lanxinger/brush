@@ -62,6 +62,15 @@ Native-MSL builds also expose an experimental, off-by-default raster-backward pa
 BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD=1 cargo run --release --features native-msl
 ```
 
+An experimental fused update for the spherical-harmonic Adam state is also
+available on Apple Silicon native-MSL builds. It preserves the existing
+per-coefficient learning-rate scaling and reduced second-moment state, and
+falls back to the generic optimizer for unsupported tensor shapes:
+
+```sh
+BRUSH_NATIVE_MSL_FUSED_SH_ADAM=1 cargo run --release --features native-msl
+```
+
 ### Web
 Brush can be compiled to WASM. Run `npm run dev` to start the demo website using Next.js, see the web directory in app/brush-app/web.
 
