@@ -8,6 +8,7 @@ license.workspace = true
 
 [features]
 debug-validation = ["brush-train/debug-validation"]
+native-msl = ["brush-render/native-msl"]
 
 [dependencies]
 brush-render.path = "../brush-render"

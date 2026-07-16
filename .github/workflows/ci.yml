@@ -84,6 +84,9 @@ jobs:
       - name: check wasm32 (browser crates)
         run: cargo check --locked -p brush-app -p brush-js --lib --target wasm32-unknown-unknown
 
+      - name: check wasm32 (native MSL feature falls back to WGSL)
+        run: cargo check --locked -p brush-app --lib --target wasm32-unknown-unknown --features native-msl
+
   # ---------------------------------------------------------------------------
 
   cargo-deny:
@@ -130,7 +133,10 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
 
-      - name: Run tests
+      - name: Run tests (default WGSL codegen)
+        run: cargo test --all
+
+      - name: Run tests (all features, native MSL on Metal)
         run: cargo test --all --all-features
 
       - name: Run doc-tests

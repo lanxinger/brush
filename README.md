@@ -46,7 +46,15 @@ While training, additional data can be visualized with the excellent [rerun](htt
 First install rust 1.88+. You can run tests with `cargo test --all`. Brush uses the wonderful [rerun](https://rerun.io/) for additional visualizations while training, run `cargo install rerun-cli` if you want to use it.
 
 ### Windows/macOS/Linux
-Use `cargo run --release` from the workspace root to make an optimized build. Use `cargo run` to run a debug build. 
+Use `cargo run --release` from the workspace root to make an optimized build. Use `cargo run` to run a debug build.
+
+On macOS, native Metal Shading Language code generation is opt-in. WGSL remains the default:
+
+```sh
+cargo run --release --features native-msl
+```
+
+The same feature is available on `brush-cli` and `brush-c`. On non-Metal backends it continues to use WGSL. The compiler choice applies to the whole binary, so compare WGSL and MSL with separate builds.
 
 ### Web
 Brush can be compiled to WASM. Run `npm run dev` to start the demo website using Next.js, see the web directory in app/brush-app/web.
@@ -80,6 +88,8 @@ You can also open this folder as a project in Android Studio and run things from
 ## Benchmarks
 
 Rendering and training are generally faster than gsplat. You can run benchmarks of some of the kernels using `cargo bench`.
+
+To benchmark native MSL code generation on macOS, run `cargo bench -p brush-bench-test --features native-msl`.
 
 # Acknowledgements
 
