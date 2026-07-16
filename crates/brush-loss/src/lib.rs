@@ -72,26 +72,25 @@ mod kernels {
     const HALO: u32 = 5;
     const SHARED_X: u32 = BLOCK_X + 2 * HALO; // 26
     const SHARED_Y: u32 = BLOCK_Y + 2 * HALO; // 26
-    // The backward kernel uses a smaller tile than the forward. Its inner
-    // blur of an already-blurred quantity widens the loaded `(pred, gt_eff)`
-    // footprint by another HALO on each side, so a 16x16 tile would need
-    // ~28 KiB of f32 shared memory; cubecl-wgpu's shared-memory limit check
-    // pessimistically doubles that and rejects the launch on Apple's 32 KiB
-    // threadgroup budget. Shrinking the tile to 8x8 fits inside the doubled
-    // bound. Forward is unaffected and stays at 16x16.
-    pub const BLOCK_X_BWD: u32 = 8;
-    pub const BLOCK_Y_BWD: u32 = 8;
-    const SHARED_X_BWD: u32 = BLOCK_X_BWD + 2 * HALO; // 18
-    const SHARED_Y_BWD: u32 = BLOCK_Y_BWD + 2 * HALO; // 18
-    const EXT_X_BWD: u32 = BLOCK_X_BWD + 4 * HALO; // 28
-    const EXT_Y_BWD: u32 = BLOCK_Y_BWD + 4 * HALO; // 28
+    // The backward kernel's inner blur of an already-blurred quantity widens
+    // the loaded `(pred, gt_eff)` footprint by another HALO on each side, so
+    // the 16x16 tile needs ~28.4 KiB of f32 shared memory — inside Apple's
+    // 32 KiB threadgroup budget. (This tile was temporarily 8x8 while
+    // cubecl-wgpu double-counted declared shared memory and rejected the
+    // launch; that accounting was fixed upstream in cubecl#1367.)
+    pub const BLOCK_X_BWD: u32 = 16;
+    pub const BLOCK_Y_BWD: u32 = 16;
+    const SHARED_X_BWD: u32 = BLOCK_X_BWD + 2 * HALO; // 26
+    const SHARED_Y_BWD: u32 = BLOCK_Y_BWD + 2 * HALO; // 26
+    const EXT_X_BWD: u32 = BLOCK_X_BWD + 4 * HALO; // 36
+    const EXT_Y_BWD: u32 = BLOCK_Y_BWD + 4 * HALO; // 36
     // Loop trip counts for cooperative loads/stores. Each phase needs at
     // least `ceil(footprint / threads)` iterations.
     const THREADS_BWD: u32 = BLOCK_X_BWD * BLOCK_Y_BWD;
-    const LOAD_ITERS_BWD: u32 = (EXT_Y_BWD * EXT_X_BWD).div_ceil(THREADS_BWD); // 13
-    const HBLUR_ITERS_BWD: u32 = (EXT_Y_BWD * SHARED_X_BWD).div_ceil(THREADS_BWD); // 8
-    const PARTIAL_ITERS_BWD: u32 = (SHARED_Y_BWD * SHARED_X_BWD).div_ceil(THREADS_BWD); // 6
-    const INNER_H_PASSES_BWD: u32 = SHARED_Y_BWD.div_ceil(BLOCK_Y_BWD); // 3
+    const LOAD_ITERS_BWD: u32 = (EXT_Y_BWD * EXT_X_BWD).div_ceil(THREADS_BWD); // 6
+    const HBLUR_ITERS_BWD: u32 = (EXT_Y_BWD * SHARED_X_BWD).div_ceil(THREADS_BWD); // 4
+    const PARTIAL_ITERS_BWD: u32 = (SHARED_Y_BWD * SHARED_X_BWD).div_ceil(THREADS_BWD); // 3
+    const INNER_H_PASSES_BWD: u32 = SHARED_Y_BWD.div_ceil(BLOCK_Y_BWD); // 2
 
     const C1: f32 = 0.01 * 0.01;
     const C2: f32 = 0.03 * 0.03;
