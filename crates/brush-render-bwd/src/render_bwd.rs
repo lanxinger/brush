@@ -1,14 +1,14 @@
-use brush_cube::{MainBackendBase, calc_cube_count_1d};
+use brush_cube::{MainBackendBase, calc_cube_count_1d, create_tensor};
 use brush_render::gaussian_splats::SplatRenderMode;
 use brush_render::kernels::types::RasterizeUniformsLaunch;
 use brush_render::sh::sh_coeffs_for_degree;
 use burn::backend::TensorMetadata;
-use burn::backend::ops::FloatTensorOps;
+use burn::backend::ops::{FloatTensorOps, IntTensorOps};
 use burn::backend::tensor::{FloatTensor, IntTensor};
-use burn::tensor::FloatDType;
+use burn::tensor::{DType, FloatDType, IntDType};
 use burn_cubecl::cubecl::CubeCount;
 use burn_cubecl::cubecl::CubeDim;
-use burn_cubecl::cubecl::features::AtomicUsage;
+use burn_cubecl::cubecl::features::{AtomicUsage, Plane};
 use burn_cubecl::cubecl::ir::{ElemType, FloatKind, Type};
 use burn_cubecl::kernel::into_contiguous;
 use burn_wgpu::WgpuRuntime;
@@ -45,6 +45,32 @@ fn use_unchecked_raster_bwd() -> bool {
     not(target_family = "wasm")
 )))]
 fn use_unchecked_raster_bwd() -> bool {
+    false
+}
+
+#[cfg(all(
+    feature = "native-msl",
+    target_os = "macos",
+    target_arch = "aarch64",
+    not(target_family = "wasm")
+))]
+fn use_coalesced_sh_grad() -> bool {
+    use std::sync::OnceLock;
+
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("BRUSH_NATIVE_MSL_COALESCED_SH_GRAD")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    })
+}
+
+#[cfg(not(all(
+    feature = "native-msl",
+    target_os = "macos",
+    target_arch = "aarch64",
+    not(target_family = "wasm")
+)))]
+fn use_coalesced_sh_grad() -> bool {
     false
 }
 
@@ -209,18 +235,35 @@ impl SplatBwdOps for MainBackendBase {
         let num_points = transforms.shape()[0];
         let client = transforms.client.clone();
 
+        let use_materialized_sh_grad = use_coalesced_sh_grad()
+            && num_points > 0
+            && project_uniforms.total_splats as usize == num_points
+            && project_uniforms.sh_degree <= 4
+            && {
+                let features = client.features();
+                let properties = client.properties();
+                features.plane.contains(Plane::Ops)
+                    && features.plane.contains(Plane::NonUniformControlFlow)
+                    && properties.hardware.plane_size_min
+                        == kernels::sh_grad_materialize::PLANE_SIZE
+                    && properties.hardware.plane_size_max
+                        == kernels::sh_grad_materialize::PLANE_SIZE
+                    && properties.hardware.max_units_per_cube
+                        >= kernels::sh_grad_materialize::WG_SIZE
+                    && properties.hardware.max_cube_dim.0 >= kernels::sh_grad_materialize::WG_SIZE
+            };
         // Dense outputs, the kernel scatters compact→global internally.
         let v_transforms = Self::float_zeros([num_points, 10].into(), &device, FloatDType::F32);
-        let v_coeffs = Self::float_zeros(
-            [
-                num_points,
-                sh_coeffs_for_degree(project_uniforms.sh_degree) as usize,
-                3,
-            ]
-            .into(),
-            &device,
-            FloatDType::F32,
-        );
+        let coeff_shape = [
+            num_points,
+            sh_coeffs_for_degree(project_uniforms.sh_degree) as usize,
+            3,
+        ];
+        let v_coeffs = if use_materialized_sh_grad {
+            create_tensor(coeff_shape, &device, DType::F32)
+        } else {
+            Self::float_zeros(coeff_shape.into(), &device, FloatDType::F32)
+        };
         let v_raw_opac = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
         let v_refine_weight = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
 
@@ -229,6 +272,14 @@ impl SplatBwdOps for MainBackendBase {
         let num_visible = project_uniforms.num_visible;
 
         let uniforms = project_uniforms.to_launch_object();
+        let sh_grad_inputs = use_materialized_sh_grad.then(|| {
+            (
+                transforms.clone(),
+                global_from_compact_gid.clone(),
+                v_combined.clone(),
+                Self::int_zeros([num_points].into(), &device, IntDType::U32),
+            )
+        });
 
         tracing::trace_span!("ProjectBackwards").in_scope(|| {
             kernels::project_backwards::project_backwards_kernel::launch::<WgpuRuntime>(
@@ -248,8 +299,61 @@ impl SplatBwdOps for MainBackendBase {
                 mip_splat,
                 project_uniforms.sh_degree,
                 project_uniforms.camera_model,
+                use_materialized_sh_grad,
             );
         });
+
+        if let Some((
+            transforms_for_sh_grad,
+            global_from_compact_for_sh_grad,
+            v_combined_for_sh_grad,
+            compact_plus_one_from_global,
+        )) = sh_grad_inputs
+        {
+            if num_visible > 0 {
+                tracing::trace_span!("BuildCompactShMap").in_scope(|| {
+                    kernels::sh_grad_materialize::build_compact_sh_map_kernel::launch::<
+                        WgpuRuntime,
+                    >(
+                        &client,
+                        calc_cube_count_1d(
+                            num_visible,
+                            kernels::sh_grad_materialize::WG_SIZE,
+                        ),
+                        CubeDim::new_1d(kernels::sh_grad_materialize::WG_SIZE),
+                        global_from_compact_for_sh_grad.into_tensor_arg(),
+                        v_combined_for_sh_grad.clone().into_tensor_arg(),
+                        compact_plus_one_from_global.clone().into_tensor_arg(),
+                        project_uniforms.to_launch_object(),
+                    );
+                });
+            }
+            tracing::trace_span!("MaterializeShGrad").in_scope(|| {
+                // SAFETY: the gate above proves total_splats == num_points,
+                // degree <= 4, and a fixed 32-lane plane. Every active plane
+                // therefore owns one in-bounds global row; compact+1 is either
+                // the zero sentinel or indexes the compact [num_visible, 10]
+                // gradient, and the three lane stores cover the entire SH row.
+                unsafe {
+                    kernels::sh_grad_materialize::materialize_sh_grad_kernel::launch_unchecked::<
+                        WgpuRuntime,
+                    >(
+                        &client,
+                        calc_cube_count_1d(
+                            project_uniforms.total_splats,
+                            kernels::sh_grad_materialize::SPLATS_PER_WG,
+                        ),
+                        CubeDim::new_1d(kernels::sh_grad_materialize::WG_SIZE),
+                        transforms_for_sh_grad.into_tensor_arg(),
+                        compact_plus_one_from_global.into_tensor_arg(),
+                        v_combined_for_sh_grad.into_tensor_arg(),
+                        v_coeffs.clone().into_tensor_arg(),
+                        project_uniforms.to_launch_object(),
+                        project_uniforms.sh_degree,
+                    );
+                }
+            });
+        }
 
         SplatGrads {
             v_transforms,

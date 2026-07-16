@@ -686,7 +686,7 @@ fn random_param(rng: &mut Sm64, n_splats: usize) -> (Lane, usize, usize) {
 /// scene packs higher-than-degree-0 SH in `Scene::sh_dc` — the generic
 /// `perturb` indexes `sh_dc[splat * 3 + comp]`, which is correct for
 /// degree 0 but lands on the wrong coefficient for higher degrees.
-/// Higher-band SH gradients are already covered by `finite_diff_sh_degree2`.
+/// Higher-band SH gradients are covered by `finite_diff_high_band_sh_coefficients`.
 fn random_param_no_sh(rng: &mut Sm64, n_splats: usize) -> (Lane, usize, usize) {
     let lane = match rng.usize_in(0, 4) {
         0 => Lane::Mean,
@@ -1341,7 +1341,7 @@ async fn fuzz_obscure_sh_degree3() {
 
     // Skip ShDc lane: generic perturb assumes 3 floats/splat for sh_dc
     // which is wrong for degree 3 (48 floats/splat). SH coefficient
-    // backward already covered by `finite_diff_sh_degree2`; this fuzz
+    // backward is covered by `finite_diff_high_band_sh_coefficients`; this fuzz
     // exercises means/rots/log_scales/raw_opac under scenes carrying
     // populated higher-band SH.
     let results =
@@ -1444,6 +1444,91 @@ async fn finite_diff_means_through_high_sh_documents_bug() {
     assert!(
         failed.is_empty(),
         "viewdir→mean backward path regressed:\n  {}",
+        failed.join("\n  "),
+    );
+}
+
+/// Exercise coefficient gradients in every SH band, including the degree-4
+/// rows that the coalesced native-MSL materializer writes across three lane
+/// passes. The generic `Lane::ShDc` helper only addresses degree-zero data.
+#[tokio::test]
+async fn finite_diff_high_band_sh_coefficients() {
+    use brush_render::sh::sh_coeffs_for_degree;
+
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let camera = Camera::new(
+        glam::vec3(-0.8, 0.6, -2.0),
+        glam::Quat::IDENTITY,
+        0.9,
+        0.9,
+        glam::vec2(0.5, 0.5),
+        CameraModel::Pinhole,
+    );
+    let img_size = glam::uvec2(48, 48);
+    let degree = 4u32;
+    let num_coeffs = sh_coeffs_for_degree(degree) as usize;
+    let row_len = num_coeffs * 3;
+    let visible_base = row_len;
+    let mut sh = vec![0.0f32; row_len * 2];
+    for channel in 0..3 {
+        sh[visible_base + channel] = 0.25 + channel as f32 * 0.05;
+    }
+    for coeff in 1..num_coeffs {
+        for channel in 0..3 {
+            sh[visible_base + coeff * 3 + channel] = 0.02 * (coeff + channel + 1) as f32;
+        }
+    }
+    let scene = Scene {
+        // Put an offscreen row first so compact splat zero maps to global row
+        // one, while the materializer must explicitly zero global row zero.
+        means: vec![100.0, 100.0, 0.1, 0.4, -0.3, 0.1],
+        rots: vec![0.9, 0.1, 0.05, 0.02, 0.9, 0.1, 0.05, 0.02],
+        log_scales: vec![-0.8, -0.9, -1.0, -0.8, -0.9, -1.0],
+        sh_dc: sh,
+        raw_opac: vec![2.0, 2.0],
+    };
+
+    let (splats, grads) = analytical_grads(&scene, &camera, img_size, &device).await;
+    let analytical = read_vec(splats.sh_coeffs.grad(&grads).expect("SH gradient")).await;
+    assert!(
+        analytical[..row_len].iter().all(|&grad| grad == 0.0),
+        "offscreen SH gradient row must be exactly zero"
+    );
+
+    // Cycle channels while checking every basis, then cover the exact SIMD
+    // pass boundaries and final packed slot.
+    let mut cases = (0..num_coeffs)
+        .map(|coeff| coeff * 3 + coeff % 3)
+        .collect::<Vec<_>>();
+    cases.extend([32, 64, 74]);
+    let epsilon = 3e-2f32;
+    let mut failed = Vec::new();
+
+    for flat in cases {
+        let expected = analytical[visible_base + flat];
+        let mut plus = scene.clone();
+        plus.sh_dc[visible_base + flat] += epsilon;
+        let plus_loss = render_value(&plus, &camera, img_size, &device).await;
+        let mut minus = scene.clone();
+        minus.sh_dc[visible_base + flat] -= epsilon;
+        let minus_loss = render_value(&minus, &camera, img_size, &device).await;
+        let numerical = (plus_loss - minus_loss) / (2.0 * epsilon);
+        let error = (numerical - expected).abs();
+        let scale = expected.abs().max(numerical.abs()).max(1e-8);
+        let tolerance = 2e-5 + 0.04 * scale;
+        if error > tolerance {
+            let coeff = flat / 3;
+            let channel = flat % 3;
+            failed.push(format!(
+                "SH[{coeff},{channel}]: numerical {numerical:.6e} vs analytical {expected:.6e} (|delta|={error:.3e} > {tolerance:.3e})"
+            ));
+        }
+    }
+
+    assert!(
+        failed.is_empty(),
+        "high-band SH coefficient gradients regressed:\n  {}",
         failed.join("\n  "),
     );
 }

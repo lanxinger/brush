@@ -23,7 +23,7 @@ mod native {
         train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds},
     };
     use brush_vfs::BrushVfs;
-    use burn::{module::AutodiffModule, prelude::Device};
+    use burn::{module::AutodiffModule, prelude::Device, tensor::Tensor};
     use clap::Parser;
 
     #[derive(Debug, Parser)]
@@ -179,16 +179,19 @@ mod native {
         step_offset: usize,
         steps: u32,
         compute_refine_weight: bool,
-    ) {
+    ) -> Option<Tensor<1>> {
+        let mut last_loss = None;
         for step in 0..steps as usize {
             let batch = batches[(step_offset + step) % batches.len()].clone();
             let current = splats.take().expect("replay always restores splats");
             let differentiable = lift_splats_to_autodiff(current);
-            let (updated, _) = trainer
+            let (updated, stats) = trainer
                 .step_with_refine_weight(batch, differentiable, compute_refine_weight)
                 .await;
             *splats = Some(updated.valid());
+            last_loss = Some(stats.loss);
         }
+        last_loss
     }
 
     fn percentile(sorted: &[f64], fraction: f64) -> f64 {
@@ -245,7 +248,7 @@ mod native {
         let mut trainer = SplatTrainer::new(&config, &device, bounds);
 
         let compute_refine_weight = !args.skip_refine_weight;
-        run_steps(
+        let _ = run_steps(
             &mut trainer,
             &mut splats,
             &batches,
@@ -257,10 +260,11 @@ mod native {
         device.sync().context("failed to synchronize warmup")?;
 
         let mut sample_ms_per_step = Vec::with_capacity(args.samples);
+        let mut final_loss = None;
         let mut step_offset = args.warmup_steps as usize;
         for _ in 0..args.samples {
             let start = Instant::now();
-            run_steps(
+            final_loss = run_steps(
                 &mut trainer,
                 &mut splats,
                 &batches,
@@ -274,6 +278,12 @@ mod native {
                 .push(start.elapsed().as_secs_f64() * 1000.0 / f64::from(args.steps_per_sample));
             step_offset += args.steps_per_sample as usize;
         }
+
+        let final_loss = final_loss
+            .context("replay produced no final loss")?
+            .into_scalar_async::<f32>()
+            .await
+            .context("failed to read final loss")?;
 
         let raw_samples = sample_ms_per_step
             .iter()
@@ -293,6 +303,7 @@ mod native {
         };
         let unchecked_raster_requested = env_enabled("BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD");
         let fused_sh_adam_requested = env_enabled("BRUSH_NATIVE_MSL_FUSED_SH_ADAM");
+        let coalesced_sh_grad_requested = env_enabled("BRUSH_NATIVE_MSL_COALESCED_SH_GRAD");
 
         println!("checkpoint: {}", args.ply.display());
         println!("dataset: {}", args.dataset.display());
@@ -300,7 +311,7 @@ mod native {
         println!("views: {} ({})", batches.len(), view_labels.join(", "));
         println!("refinement weight: {compute_refine_weight}");
         println!(
-            "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | seed: {}",
+            "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | coalesced SH grad requested: {coalesced_sh_grad_requested} | seed: {}",
             args.seed
         );
         println!(
@@ -311,8 +322,9 @@ mod native {
             "median {median:.3} ms/step | p95 {p95:.3} | mean {mean:.3} | min {min:.3} | max {max:.3} | {:.2} steps/s",
             1000.0 / median
         );
+        println!("final loss: {final_loss:.9}");
         println!(
-            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6}",
+            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} coalesced_sh_grad_requested={coalesced_sh_grad_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6} final_loss={final_loss:.9}",
             args.seed,
             batches.len(),
             view_labels.join(","),

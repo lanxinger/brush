@@ -71,6 +71,17 @@ falls back to the generic optimizer for unsupported tensor shapes:
 BRUSH_NATIVE_MSL_FUSED_SH_ADAM=1 cargo run --release --features native-msl
 ```
 
+An experimental Apple Silicon native-MSL path can also coalesce dense
+spherical-harmonic gradient materialization. This path preserves exact zero
+rows for splats that do not contribute to the sampled view, so optimizer
+momentum decay and the dense gradient contract remain unchanged. It falls back
+to the existing path when the required 32-lane SIMD-group support is
+unavailable:
+
+```sh
+BRUSH_NATIVE_MSL_COALESCED_SH_GRAD=1 cargo run --release --features native-msl
+```
+
 ### Web
 Brush can be compiled to WASM. Run `npm run dev` to start the demo website using Next.js, see the web directory in app/brush-app/web.
 
