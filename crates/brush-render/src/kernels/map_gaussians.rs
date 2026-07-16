@@ -6,8 +6,7 @@ use burn_cubecl::cubecl::cube;
 use burn_cubecl::cubecl::prelude::*;
 
 use super::helpers::{
-    compute_bbox_extent, count_contributing_tiles, get_tile_bbox, read_main_splat, tile_rect,
-    will_primitive_contribute,
+    compute_bbox_extent, get_tile_bbox, read_main_splat, tile_rect, will_primitive_contribute,
 };
 
 pub const WG_SIZE: u32 = 256;
@@ -43,12 +42,6 @@ pub fn map_gaussians_to_intersect_kernel(
     );
     // Slot budget reserved for this splat in PF.
     let pf_count = splat_cum_hit_counts[compact_gid as usize] - base_isect_id;
-    // What this kernel's loop body will actually count. Should match
-    // `pf_count` because PF runs the same `count_contributing_tiles`
-    // helper, but the two dispatches go through separate shader
-    // optimisation passes; we belt-and-suspenders the mismatch below.
-    let local_count = count_contributing_tiles(bb, xy_x, xy_y, conic, power_threshold);
-    let writable = min(local_count, pf_count);
 
     // Tile id past the valid range — radix-sorts after every real tile
     // and lives outside `tile_offsets`, so the rasterize pass never
@@ -63,7 +56,7 @@ pub fn map_gaussians_to_intersect_kernel(
         let ty = (tile_idx / bb_w) + bb.min_y;
         let rect = tile_rect(tx, ty);
         if will_primitive_contribute(rect, xy_x, xy_y, conic, power_threshold)
-            && num_tiles_hit < writable
+            && num_tiles_hit < pf_count
         {
             let tile_id = tx + ty * tile_bw;
             let isect_id = base_isect_id + num_tiles_hit;
@@ -75,7 +68,10 @@ pub fn map_gaussians_to_intersect_kernel(
 
     // Pad the leftover budget with sentinel rows so no slot in
     // `[base_isect_id, base_isect_id + pf_count)` is left uninitialised.
-    for pad_idx in writable..pf_count {
+    // Usually `num_tiles_hit == pf_count`; the fallback covers any difference
+    // between the separately optimised project and map shaders without a
+    // second full tile traversal.
+    for pad_idx in num_tiles_hit..pf_count {
         let isect_id = base_isect_id + pad_idx;
         tile_id_from_isect[isect_id as usize] = sentinel_tile_id;
         compact_gid_from_isect[isect_id as usize] = compact_gid;

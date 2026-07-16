@@ -191,11 +191,10 @@ pub fn compensate_cov2d(c: Sym2, #[comptime] mip_splatting: bool) -> (Sym2, f32)
 }
 
 /// Walk the tiles in `bb` in linearised mod/div order and count those
-/// that pass `will_primitive_contribute`. Shared between
-/// `project_forward` and `map_gaussians_to_intersect` so both dispatches
-/// run *byte-identical* loop bodies. Drift between the two counts would
-/// leave uninitialised slots in `compact_gid_from_isect`; map_gaussians
-/// pads with a sentinel `tile_id` defensively in case it still happens.
+/// that pass `will_primitive_contribute`. `project_forward` uses this to
+/// reserve the per-splat intersection budget. The map pass uses the same
+/// predicate while writing, clamps to that budget, and sentinel-pads any
+/// shortfall caused by compiler drift.
 #[cube]
 pub fn count_contributing_tiles(
     bb: TileBbox,

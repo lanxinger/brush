@@ -20,10 +20,10 @@ pub fn get_tile_offsets(
     let base_id = absolute_pos * CHECKS_PER_ITER;
 
     // `tile_id_from_isect` can contain the sentinel `num_tiles` produced by
-    // `map_gaussians_to_intersect` whenever its `count_contributing_tiles`
-    // disagrees with PF (separate optimisation passes). `tile_offsets` is
-    // sized for valid tiles only, so we must gate every write on `tid <
-    // num_tiles` to avoid stomping the slot one past the end.
+    // `map_gaussians_to_intersect` whenever its predicate yields fewer hits
+    // than PF reserved (separate optimisation passes). `tile_offsets` is sized
+    // for valid tiles only, so we must gate every write on `tid < num_tiles` to
+    // avoid stomping the slot one past the end.
     #[unroll]
     for i in 0..CHECKS_PER_ITER {
         let isect_id = base_id + i;
