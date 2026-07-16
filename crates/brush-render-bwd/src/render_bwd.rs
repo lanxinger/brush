@@ -49,6 +49,7 @@ fn use_unchecked_raster_bwd() -> bool {
 }
 
 impl SplatBwdOps for MainBackendBase {
+    #[allow(clippy::too_many_arguments)]
     fn rasterize_bwd(
         out_img: FloatTensor<Self>,
         projected_splats: FloatTensor<Self>,
@@ -58,6 +59,31 @@ impl SplatBwdOps for MainBackendBase {
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
         smooth_cutoff: bool,
+    ) -> RasterizeGrads<Self> {
+        Self::rasterize_bwd_with_refine_weight(
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rasterize_bwd_with_refine_weight(
+        out_img: FloatTensor<Self>,
+        projected_splats: FloatTensor<Self>,
+        compact_gid_from_isect: IntTensor<Self>,
+        tile_offsets: IntTensor<Self>,
+        background: Vec3,
+        img_size: glam::UVec2,
+        v_output: FloatTensor<Self>,
+        smooth_cutoff: bool,
+        compute_refine_weight: bool,
     ) -> RasterizeGrads<Self> {
         let _span = tracing::trace_span!("rasterize_bwd").entered();
 
@@ -120,6 +146,7 @@ impl SplatBwdOps for MainBackendBase {
                         v_combined.clone().into_tensor_arg(),
                         uniforms,
                         smooth_cutoff,
+                        compute_refine_weight,
                     );
                 }
             } else if hard_floats {
@@ -135,6 +162,7 @@ impl SplatBwdOps for MainBackendBase {
                     v_combined.clone().into_tensor_arg(),
                     uniforms,
                     smooth_cutoff,
+                    compute_refine_weight,
                 );
             } else {
                 // Keep bounds checks for the CAS fallback: its weak-CAS retry loop does not meet
@@ -151,6 +179,7 @@ impl SplatBwdOps for MainBackendBase {
                     v_combined.clone().into_tensor_arg(),
                     uniforms,
                     smooth_cutoff,
+                    compute_refine_weight,
                 );
             }
         });

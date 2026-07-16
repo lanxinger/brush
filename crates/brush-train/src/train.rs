@@ -13,7 +13,7 @@ use brush_dataset::scene::SceneBatch;
 use brush_loss::{ImageLossConfig, image_loss};
 use brush_render::gaussian_splats::Splats;
 use brush_render::{AlphaMode, bounding_box::BoundingBox, sh::sh_coeffs_for_degree};
-use brush_render_bwd::render_splats;
+use brush_render_bwd::render_splats_with_refine_weight;
 use burn::{
     backend::wgpu::{AutoCompiler, WgpuDevice, WgpuRuntime},
     lr_scheduler::{
@@ -155,6 +155,24 @@ impl SplatTrainer {
     }
 
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
+        self.step_with_refine_weight(batch, splats, true).await
+    }
+
+    /// Whether the refinement-only gradient statistic is still consumed by
+    /// high-gradient densification at `global_iter`.
+    pub fn refinement_weight_needed(&self, global_iter: u32) -> bool {
+        global_iter < self.config.growth_stop_iter
+    }
+
+    /// Run one training step, optionally omitting the refinement-only raster
+    /// gradient statistic. Model gradients, visibility, and screen-radius
+    /// bookkeeping are always preserved.
+    pub async fn step_with_refine_weight(
+        &mut self,
+        batch: SceneBatch,
+        splats: Splats,
+        compute_refine_weight: bool,
+    ) -> (Splats, TrainStepStats) {
         let mut splats = splats;
 
         // Track max SH degree from the first splats we see.
@@ -188,9 +206,15 @@ impl SplatTrainer {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
             let render_input = splats.clone();
-            let diff_out = render_splats(render_input, &camera, img_size, background)
-                .instrument(trace_span!("Forward"))
-                .await;
+            let diff_out = render_splats_with_refine_weight(
+                render_input,
+                &camera,
+                img_size,
+                background,
+                compute_refine_weight,
+            )
+            .instrument(trace_span!("Forward"))
+            .await;
 
             let pred_image = diff_out.img;
             let refine_weight_holder = diff_out.refine_weight_holder;
@@ -265,17 +289,27 @@ impl SplatTrainer {
                 // the residual `checkpointing` flag that bare `.inner()`
                 // leaves behind (see `brush_render::burn_glue`).
                 use brush_render::burn_glue::detach_autodiff;
-                let refine_weight = refine_weight_holder
-                    .grad_remove(&mut grads)
-                    .expect("XY gradients need to be calculated.");
                 let device = splats.device().inner();
                 let record = self
                     .refine_record
                     .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
                 // `visible` / `max_radius` already arrive on the inner backend;
-                // only the freshly-extracted `refine_weight` gradient needs the
-                // autodiff stripped off.
-                record.gather_stats(detach_autodiff(refine_weight), visible.clone(), max_radius);
+                // only a freshly-extracted `refine_weight` gradient needs the
+                // autodiff stripped off. Once growth stops, it is no longer
+                // consumed, but visibility and screen size still feed pruning
+                // and oversized-splat splitting.
+                if compute_refine_weight {
+                    let refine_weight = refine_weight_holder
+                        .grad_remove(&mut grads)
+                        .expect("XY gradients need to be calculated.");
+                    record.gather_stats(
+                        detach_autodiff(refine_weight),
+                        visible.clone(),
+                        max_radius,
+                    );
+                } else {
+                    record.gather_aux_stats(visible.clone(), max_radius);
+                }
             });
 
             (grads, visible, diff_out.num_visible, loss_inner)

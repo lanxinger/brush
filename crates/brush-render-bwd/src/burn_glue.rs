@@ -68,6 +68,33 @@ pub trait SplatBwdOps: SplatOps {
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self>;
 
+    /// Specialized raster backward which may omit the refinement-only
+    /// statistic. Backends that do not override this retain the compatible
+    /// full-gradient behavior.
+    #[allow(clippy::too_many_arguments)]
+    fn rasterize_bwd_with_refine_weight(
+        out_img: FloatTensor<Self>,
+        projected_splats: FloatTensor<Self>,
+        compact_gid_from_isect: IntTensor<Self>,
+        tile_offsets: IntTensor<Self>,
+        background: Vec3,
+        img_size: glam::UVec2,
+        v_output: FloatTensor<Self>,
+        smooth_cutoff: bool,
+        _compute_refine_weight: bool,
+    ) -> RasterizeGrads<Self> {
+        Self::rasterize_bwd(
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+        )
+    }
+
     /// Backward pass for projection.
     /// Reads sparse `v_combined` [`num_visible`, 9], writes dense outputs (scatter in kernel).
     /// `sh_coeffs` is the original (input) SH coefficient tensor — needed
@@ -134,8 +161,9 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
             coeffs_parent,
             raw_opacity_parent,
         ] = ops.parents;
+        let compute_refine_weight = refine_weight.is_some();
 
-        let rasterize_grads = B::rasterize_bwd(
+        let rasterize_grads = B::rasterize_bwd_with_refine_weight(
             state.out_img,
             state.projected_splats,
             state.compact_gid_from_isect,
@@ -144,6 +172,7 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
             state.img_size,
             v_output,
             state.pass.smooth_cutoff(),
+            compute_refine_weight,
         );
 
         let splat_grads = B::project_bwd(
@@ -220,12 +249,28 @@ pub async fn render_splats(
     img_size: glam::UVec2,
     background: Vec3,
 ) -> SplatOutputDiff {
-    render_splats_with_pass(
+    render_splats_with_refine_weight(splats, camera, img_size, background, true).await
+}
+
+/// Render splats on a differentiable device, optionally tracking the
+/// refinement-only screen-space gradient statistic.
+///
+/// Model gradients and render auxiliaries are unchanged when
+/// `compute_refine_weight` is false.
+pub async fn render_splats_with_refine_weight(
+    splats: Splats,
+    camera: &Camera,
+    img_size: glam::UVec2,
+    background: Vec3,
+    compute_refine_weight: bool,
+) -> SplatOutputDiff {
+    render_splats_with_pass_and_refine_weight(
         splats,
         camera,
         img_size,
         background,
         brush_render::gaussian_splats::RasterPass::Backward,
+        compute_refine_weight,
     )
     .await
 }
@@ -241,6 +286,18 @@ pub async fn render_splats_with_pass(
     background: Vec3,
     pass: brush_render::gaussian_splats::RasterPass,
 ) -> SplatOutputDiff {
+    render_splats_with_pass_and_refine_weight(splats, camera, img_size, background, pass, true)
+        .await
+}
+
+async fn render_splats_with_pass_and_refine_weight(
+    splats: Splats,
+    camera: &Camera,
+    img_size: glam::UVec2,
+    background: Vec3,
+    pass: brush_render::gaussian_splats::RasterPass,
+    compute_refine_weight: bool,
+) -> SplatOutputDiff {
     splats.clone().validate_values().await;
 
     let device = splats.device();
@@ -249,7 +306,12 @@ pub async fn render_splats_with_pass(
         "brush_render_bwd::render_splats requires an autodiff-enabled device"
     );
 
-    let refine_weight_holder = Tensor::<1>::zeros([1], &device).require_grad();
+    let refine_weight_holder = Tensor::<1>::zeros([1], &device);
+    let refine_weight_holder = if compute_refine_weight {
+        refine_weight_holder.require_grad()
+    } else {
+        refine_weight_holder
+    };
 
     // Fold the 3D-filter floor into scales/opacity for the render. `min_scale`
     // lives on the inner backend; `fold_min_scale` lifts it onto the autodiff
@@ -356,12 +418,38 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
         v_output: FloatTensor<Self>,
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self> {
+        Self::rasterize_bwd_with_refine_weight(
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rasterize_bwd_with_refine_weight(
+        out_img: FloatTensor<Self>,
+        projected_splats: FloatTensor<Self>,
+        compact_gid_from_isect: IntTensor<Self>,
+        tile_offsets: IntTensor<Self>,
+        background: Vec3,
+        img_size: glam::UVec2,
+        v_output: FloatTensor<Self>,
+        smooth_cutoff: bool,
+        compute_refine_weight: bool,
+    ) -> RasterizeGrads<Self> {
         #[derive(Debug)]
         struct CustomOp {
             desc: CustomOpIr,
             background: Vec3,
             img_size: glam::UVec2,
             smooth_cutoff: bool,
+            compute_refine_weight: bool,
         }
 
         impl Operation<FusionCubeRuntime<WgpuRuntime>> for CustomOp {
@@ -381,7 +469,7 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
 
                 let [v_combined] = outputs;
 
-                let grads = <MainBackendBase as SplatBwdOps>::rasterize_bwd(
+                let grads = <MainBackendBase as SplatBwdOps>::rasterize_bwd_with_refine_weight(
                     h.get_float_tensor::<MainBackendBase>(out_img),
                     h.get_float_tensor::<MainBackendBase>(projected_splats),
                     h.get_int_tensor::<MainBackendBase>(compact_gid_from_isect),
@@ -390,6 +478,7 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
                     self.img_size,
                     h.get_float_tensor::<MainBackendBase>(v_output),
                     self.smooth_cutoff,
+                    self.compute_refine_weight,
                 );
 
                 h.register_float_tensor::<MainBackendBase>(&v_combined.id, grads.v_combined);
@@ -427,6 +516,7 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
                 background,
                 img_size,
                 smooth_cutoff,
+                compute_refine_weight,
             };
             client
                 .register(stream, OperationIr::Custom(desc), op)

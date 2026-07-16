@@ -68,6 +68,10 @@ mod native {
         /// Seed for GPU-side training noise.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+
+        /// Skip the refinement-only raster gradient statistic for late-phase A/B timing.
+        #[arg(long)]
+        skip_refine_weight: bool,
     }
 
     fn validate_args(args: &Args) -> Result<()> {
@@ -174,12 +178,15 @@ mod native {
         batches: &[SceneBatch],
         step_offset: usize,
         steps: u32,
+        compute_refine_weight: bool,
     ) {
         for step in 0..steps as usize {
             let batch = batches[(step_offset + step) % batches.len()].clone();
             let current = splats.take().expect("replay always restores splats");
             let differentiable = lift_splats_to_autodiff(current);
-            let (updated, _) = trainer.step(batch, differentiable).await;
+            let (updated, _) = trainer
+                .step_with_refine_weight(batch, differentiable, compute_refine_weight)
+                .await;
             *splats = Some(updated.valid());
         }
     }
@@ -237,7 +244,16 @@ mod native {
         };
         let mut trainer = SplatTrainer::new(&config, &device, bounds);
 
-        run_steps(&mut trainer, &mut splats, &batches, 0, args.warmup_steps).await;
+        let compute_refine_weight = !args.skip_refine_weight;
+        run_steps(
+            &mut trainer,
+            &mut splats,
+            &batches,
+            0,
+            args.warmup_steps,
+            compute_refine_weight,
+        )
+        .await;
         device.sync().context("failed to synchronize warmup")?;
 
         let mut sample_ms_per_step = Vec::with_capacity(args.samples);
@@ -250,6 +266,7 @@ mod native {
                 &batches,
                 step_offset,
                 args.steps_per_sample,
+                compute_refine_weight,
             )
             .await;
             device.sync().context("failed to synchronize sample")?;
@@ -258,6 +275,11 @@ mod native {
             step_offset += args.steps_per_sample as usize;
         }
 
+        let raw_samples = sample_ms_per_step
+            .iter()
+            .map(|sample| format!("{sample:.6}"))
+            .collect::<Vec<_>>()
+            .join(",");
         sample_ms_per_step.sort_by(f64::total_cmp);
         let median = median(&sample_ms_per_step);
         let p95 = percentile(&sample_ms_per_step, 0.95);
@@ -276,6 +298,7 @@ mod native {
         println!("dataset: {}", args.dataset.display());
         println!("splats: {splat_count}");
         println!("views: {} ({})", batches.len(), view_labels.join(", "));
+        println!("refinement weight: {compute_refine_weight}");
         println!(
             "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | seed: {}",
             args.seed
@@ -289,7 +312,7 @@ mod native {
             1000.0 / median
         );
         println!(
-            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6}",
+            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6}",
             args.seed,
             batches.len(),
             view_labels.join(","),
@@ -297,6 +320,9 @@ mod native {
             args.steps_per_sample,
             args.warmup_steps,
             1000.0 / median
+        );
+        println!(
+            "BRUSH_REPLAY_SAMPLES compute_refine_weight={compute_refine_weight} ms_per_step={raw_samples}"
         );
 
         Ok(())

@@ -121,6 +121,10 @@ The replay restores model parameters but starts fresh optimizer state. It is
 intended to reproduce geometry-, visibility-, and resolution-dependent GPU work,
 not to resume training numerically from the checkpoint.
 
+Pass `--skip-refine-weight` to benchmark the late phase after high-gradient
+densification stops. Production training selects that path automatically at
+`--growth-stop-iter`; visibility and screen-radius refinement stats remain enabled.
+
 # Acknowledgements
 
 [**gSplat**](https://github.com/nerfstudio-project/gsplat), for their reference version of the kernels

@@ -20,7 +20,7 @@ use brush_render::{
         radial_tangential_8::RadialTangential8Params, thin_prism_fisheye::ThinPrismFisheyeParams,
     },
 };
-use brush_render_bwd::render_splats_with_pass;
+use brush_render_bwd::{render_splats_with_pass, render_splats_with_refine_weight};
 
 /// Finite-diff tests need the C^1 cutoff so analytical and numerical
 /// agree at typical eps; production paths use the hard step.
@@ -171,6 +171,66 @@ async fn read_first<const D: usize>(t: Tensor<D>) -> f32 {
         .expect("readback")
         .into_vec::<f32>()
         .expect("vec")[0]
+}
+
+async fn read_vec<const D: usize>(t: Tensor<D>) -> Vec<f32> {
+    t.into_data_async()
+        .await
+        .expect("readback")
+        .into_vec::<f32>()
+        .expect("vec")
+}
+
+fn assert_close(label: &str, actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len(), "{label} length");
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        let tolerance = 2e-5 + 2e-4 * expected.abs();
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{label}[{index}]: actual={actual:e}, expected={expected:e}, tolerance={tolerance:e}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn disabling_refine_weight_preserves_model_gradients_and_aux() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let scene = base_scene();
+    let camera = std_cam();
+    let img_size = glam::uvec2(32, 32);
+
+    let splats_on = build_splats(&scene, &device);
+    let output_on =
+        render_splats_with_refine_weight(splats_on.clone(), &camera, img_size, Vec3::ZERO, true)
+            .await;
+    let visible_on = read_vec(output_on.visible.clone()).await;
+    let radius_on = read_vec(output_on.max_radius.clone()).await;
+    let holder_on = output_on.refine_weight_holder;
+    let grads_on = output_on.img.mean().backward();
+    assert!(holder_on.grad(&grads_on).is_some());
+    let transforms_on = read_vec(splats_on.transforms.grad(&grads_on).unwrap()).await;
+    let sh_on = read_vec(splats_on.sh_coeffs.grad(&grads_on).unwrap()).await;
+    let opacity_on = read_vec(splats_on.raw_opacities.grad(&grads_on).unwrap()).await;
+
+    let splats_off = build_splats(&scene, &device);
+    let output_off =
+        render_splats_with_refine_weight(splats_off.clone(), &camera, img_size, Vec3::ZERO, false)
+            .await;
+    let visible_off = read_vec(output_off.visible.clone()).await;
+    let radius_off = read_vec(output_off.max_radius.clone()).await;
+    let holder_off = output_off.refine_weight_holder;
+    let grads_off = output_off.img.mean().backward();
+    assert!(holder_off.grad(&grads_off).is_none());
+    let transforms_off = read_vec(splats_off.transforms.grad(&grads_off).unwrap()).await;
+    let sh_off = read_vec(splats_off.sh_coeffs.grad(&grads_off).unwrap()).await;
+    let opacity_off = read_vec(splats_off.raw_opacities.grad(&grads_off).unwrap()).await;
+
+    assert_close("transforms", &transforms_off, &transforms_on);
+    assert_close("SH", &sh_off, &sh_on);
+    assert_close("opacity", &opacity_off, &opacity_on);
+    assert_close("visibility", &visible_off, &visible_on);
+    assert_close("max radius", &radius_off, &radius_on);
 }
 
 async fn analytical_at(
