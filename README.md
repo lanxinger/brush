@@ -97,6 +97,21 @@ Rendering and training are generally faster than gsplat. You can run benchmarks 
 
 To benchmark native MSL code generation on macOS, run `cargo bench -p brush-bench-test --features native-msl`.
 
+For a steady-state replay using an exported checkpoint and real dataset views,
+use the standalone benchmark binary. Setup, image decoding, pipeline compilation,
+and optimizer initialization happen before timing:
+
+```sh
+cargo run --release -p brush-bench-test --bin brush-checkpoint-replay --features native-msl -- \
+  --dataset /path/to/dataset \
+  --ply /path/to/checkpoint.ply \
+  --eval-split-every 20
+```
+
+The replay restores model parameters but starts fresh optimizer state. It is
+intended to reproduce geometry-, visibility-, and resolution-dependent GPU work,
+not to resume training numerically from the checkpoint.
+
 # Acknowledgements
 
 [**gSplat**](https://github.com/nerfstudio-project/gsplat), for their reference version of the kernels
