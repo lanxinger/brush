@@ -56,6 +56,12 @@ cargo run --release --features native-msl
 
 The same feature is available on `brush-cli` and `brush-c`. On non-Metal backends it continues to use WGSL. The compiler choice applies to the whole binary, so compare WGSL and MSL with separate builds.
 
+Native-MSL builds also expose an experimental, off-by-default raster-backward path without generated buffer bounds checks. It relies on the renderer's tile/range invariants and requires native float atomics (otherwise it falls back to the checked path), so use it for controlled benchmarking and soaks rather than production builds:
+
+```sh
+BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD=1 cargo run --release --features native-msl
+```
+
 ### Web
 Brush can be compiled to WASM. Run `npm run dev` to start the demo website using Next.js, see the web directory in app/brush-app/web.
 

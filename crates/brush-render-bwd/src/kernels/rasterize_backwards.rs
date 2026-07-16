@@ -97,7 +97,7 @@ impl AtomicAddF32 for CasAtomicAdd {
     }
 }
 
-#[cube(launch)]
+#[cube(launch, launch_unchecked)]
 pub fn rasterize_backwards_kernel<A: AtomicAddF32>(
     compact_gid_from_isect: &Tensor<u32>,
     tile_offsets: &Tensor<u32>,

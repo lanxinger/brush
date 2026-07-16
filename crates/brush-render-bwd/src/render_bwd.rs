@@ -18,6 +18,36 @@ use crate::burn_glue::{RasterizeGrads, SplatBwdOps, SplatGrads};
 use crate::kernels;
 use brush_render::shaders::helpers::ProjectUniforms;
 
+#[cfg(all(
+    feature = "native-msl",
+    target_os = "macos",
+    not(target_family = "wasm")
+))]
+fn use_unchecked_raster_bwd() -> bool {
+    use std::sync::OnceLock;
+
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = std::env::var("BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if enabled {
+            tracing::warn!(
+                "experimental unchecked native-MSL raster backward requested; devices without native float atomics retain bounds checks"
+            );
+        }
+        enabled
+    })
+}
+
+#[cfg(not(all(
+    feature = "native-msl",
+    target_os = "macos",
+    not(target_family = "wasm")
+)))]
+fn use_unchecked_raster_bwd() -> bool {
+    false
+}
+
 impl SplatBwdOps for MainBackendBase {
     fn rasterize_bwd(
         out_img: FloatTensor<Self>,
@@ -63,12 +93,36 @@ impl SplatBwdOps for MainBackendBase {
             background.y,
             background.z,
         );
+        let use_unchecked = use_unchecked_raster_bwd();
 
         tracing::trace_span!("RasterizeBackwards").in_scope(|| {
             use kernels::rasterize_backwards::{
                 CasAtomicAdd, HfAtomicAdd, rasterize_backwards_kernel,
             };
-            if hard_floats {
+            if hard_floats && use_unchecked {
+                // SAFETY: the forward pass guarantees two ordered offsets per launched tile,
+                // with range_hi <= compact_gid_from_isect.len(); every compact ID is below the
+                // projected/v_combined row count; projected rows have the fixed splat stride; and
+                // contiguous output/v_output buffers both contain exactly img_w * img_h * 4
+                // values. Image and partial-batch accesses are guarded in the kernel, host tensor
+                // sizes fit its u32/usize index arithmetic, and all loops are bounded by those
+                // finite tile ranges. This path uses native float atomics, not the CAS retry loop.
+                unsafe {
+                    rasterize_backwards_kernel::launch_unchecked::<HfAtomicAdd, WgpuRuntime>(
+                        &client,
+                        cube_count,
+                        cube_dim,
+                        compact_gid_from_isect.into_tensor_arg(),
+                        tile_offsets.into_tensor_arg(),
+                        projected_splats.into_tensor_arg(),
+                        out_img.into_tensor_arg(),
+                        v_output.into_tensor_arg(),
+                        v_combined.clone().into_tensor_arg(),
+                        uniforms,
+                        smooth_cutoff,
+                    );
+                }
+            } else if hard_floats {
                 rasterize_backwards_kernel::launch::<HfAtomicAdd, WgpuRuntime>(
                     &client,
                     cube_count,
@@ -83,6 +137,8 @@ impl SplatBwdOps for MainBackendBase {
                     smooth_cutoff,
                 );
             } else {
+                // Keep bounds checks for the CAS fallback: its weak-CAS retry loop does not meet
+                // CubeCL's unchecked-launch termination contract on every target.
                 rasterize_backwards_kernel::launch::<CasAtomicAdd, WgpuRuntime>(
                     &client,
                     cube_count,

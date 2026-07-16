@@ -6,7 +6,11 @@ readme.workspace = true
 license.workspace = true
 
 [features]
-native-msl = ["brush-render/native-msl"]
+native-msl = [
+    "brush-render/native-msl",
+    "brush-render-bwd/native-msl",
+    "brush-train/native-msl",
+]
 
 [dependencies]
 brush-render = { path = "../brush-render", features = ["debug-validation"] }
