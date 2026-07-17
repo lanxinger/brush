@@ -14,6 +14,11 @@ the current global depth sort and stable per-tile order. It must remain opt-in:
 finer tiles can increase intersection storage and per-splat backward atomic
 fan-in even when they reduce wasted pixel work.
 
+Follow-up: 8x8 passed the speed gate but exceeded the 1.16M memory limit. The
+subsequent 16x8 candidate passed both measured gates and is the retained
+experimental geometry. See
+[`egg-raster-fine-tile-results.md`](egg-raster-fine-tile-results.md).
+
 ## Provenance
 
 - Dataset: `/Users/markus/Downloads/GS_DATASETS/egg`

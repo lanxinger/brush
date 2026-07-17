@@ -89,6 +89,23 @@ Only `1` and case-insensitive `true` enable a switch. `0`, case-insensitive
 individual options are off by default, and have no effect unless the required
 native-MSL build and platform gates are present.
 
+An experimental 16x8 training rasterizer can be selected independently on
+Apple Silicon native-MSL builds:
+
+```sh
+BRUSH_NATIVE_MSL_FINE_RASTER_TILES=1 cargo run --release --features native-msl
+```
+
+This switch is intentionally not part of `BRUSH_NATIVE_MSL_PRESET`. It replaces
+the production 16x16 tile geometry for the forward, map, raster, and backward
+passes as one unit. Fine tiles alone retain bounds checks in raster backward;
+the existing `BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD` option also applies to the
+candidate when separately requested or inherited from the preset. Product render
+entry points and ordinary training continue to use 16x16 tiles when the switch
+is absent. The performance and memory gates are recorded in the
+[fine-tile results](docs/performance/egg-raster-fine-tile-results.md); keep 16x8
+experimental until the remaining full 15k quality bake-off and longer soak pass.
+
 Native-MSL builds also expose an experimental, off-by-default raster-backward path without generated buffer bounds checks. It relies on the renderer's tile/range invariants and requires native float atomics (otherwise it falls back to the checked path), so use it for controlled benchmarking and soaks rather than production builds:
 
 ```sh

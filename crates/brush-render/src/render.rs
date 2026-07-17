@@ -28,9 +28,21 @@ use std::f32::consts::PI;
 
 #[doc(hidden)]
 pub fn calc_tile_bounds(img_size: glam::UVec2) -> glam::UVec2 {
+    calc_tile_bounds_for_dims(
+        img_size,
+        shaders::helpers::TILE_WIDTH,
+        shaders::helpers::TILE_WIDTH,
+    )
+}
+
+fn calc_tile_bounds_for_dims(
+    img_size: glam::UVec2,
+    tile_width: u32,
+    tile_height: u32,
+) -> glam::UVec2 {
     uvec2(
-        img_size.x.div_ceil(shaders::helpers::TILE_WIDTH),
-        img_size.y.div_ceil(shaders::helpers::TILE_WIDTH),
+        img_size.x.div_ceil(tile_width),
+        img_size.y.div_ceil(tile_height),
     )
 }
 
@@ -45,7 +57,7 @@ impl SplatOps for MainBackendBase {
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: RasterPass,
-        _rasterizer: Rasterizer,
+        rasterizer: Rasterizer,
     ) -> RenderOutput<Self> {
         assert!(
             img_size[0] > 0 && img_size[1] > 0,
@@ -53,6 +65,9 @@ impl SplatOps for MainBackendBase {
         );
         let bwd_info = pass.bwd_info();
         let smooth_cutoff = pass.smooth_cutoff();
+        let tile_width = rasterizer.tile_width();
+        let tile_height = rasterizer.tile_height();
+        let tile_size = rasterizer.tile_size();
 
         let transforms = into_contiguous(transforms);
         let sh_coeffs = into_contiguous(sh_coeffs);
@@ -78,7 +93,7 @@ impl SplatOps for MainBackendBase {
             pinhole_params,
             camera_position: [camera.position.x, camera.position.y, camera.position.z, 0.0],
             img_size: img_size.into(),
-            tile_bounds: calc_tile_bounds(img_size).into(),
+            tile_bounds: calc_tile_bounds_for_dims(img_size, tile_width, tile_height).into(),
             sh_degree,
             total_splats,
             num_visible: 0, // num_visible — not yet known.
@@ -132,6 +147,8 @@ impl SplatOps for MainBackendBase {
                 uniforms,
                 mip_splat,
                 camera.camera_model,
+                tile_width,
+                tile_height,
             );
             (
                 global_from_presort_gid,
@@ -223,6 +240,8 @@ impl SplatOps for MainBackendBase {
                 project_uniforms.tile_bounds[0],
                 project_uniforms.tile_bounds[1],
                 num_visible,
+                tile_width,
+                tile_height,
             );
         });
         let bits = u32::BITS - num_tiles.leading_zeros();
@@ -299,11 +318,8 @@ impl SplatOps for MainBackendBase {
             );
             kernels::rasterize::rasterize_kernel::launch::<WgpuRuntime>(
                 &client,
-                calc_cube_count_1d(
-                    num_tiles * (shaders::helpers::TILE_WIDTH * shaders::helpers::TILE_WIDTH),
-                    shaders::helpers::TILE_WIDTH * shaders::helpers::TILE_WIDTH,
-                ),
-                CubeDim::new_1d(shaders::helpers::TILE_SIZE),
+                calc_cube_count_1d(num_tiles * tile_size, tile_size),
+                CubeDim::new_1d(tile_size),
                 compact_gid_from_isect.clone().into_tensor_arg(),
                 tile_offsets.clone().into_tensor_arg(),
                 projected_splats.clone().into_tensor_arg(),
@@ -314,6 +330,8 @@ impl SplatOps for MainBackendBase {
                 uniforms,
                 bwd_info,
                 smooth_cutoff,
+                tile_width,
+                tile_height,
             );
         });
         #[cfg(feature = "raster-census")]
@@ -343,6 +361,8 @@ impl SplatOps for MainBackendBase {
                 request,
                 img_size,
                 tile_bounds,
+                tile_width,
+                tile_height,
                 num_visible,
                 num_intersections,
                 smooth_cutoff,

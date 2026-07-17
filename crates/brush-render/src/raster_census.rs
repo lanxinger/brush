@@ -1,4 +1,4 @@
-//! Opt-in CPU workload census for the legacy raster pipeline.
+//! Opt-in CPU workload census for the tile-based raster pipeline.
 //!
 //! This module is compiled only with the `raster-census` feature. It reads the
 //! existing projected splats, intersection list, and tile offsets around the
@@ -10,9 +10,7 @@ use std::sync::Mutex;
 use glam::UVec2;
 use serde::Serialize;
 
-use crate::kernels::helpers::{
-    ALPHA_CUTOFF_BAND, ALPHA_CUTOFF_MID, PROJECTED_LANES_USIZE, TILE_WIDTH,
-};
+use crate::kernels::helpers::{ALPHA_CUTOFF_BAND, ALPHA_CUTOFF_MID, PROJECTED_LANES_USIZE};
 
 #[derive(Debug)]
 struct PendingCensus {
@@ -122,6 +120,7 @@ pub struct RasterCensusReport {
     pub image_width: u32,
     pub image_height: u32,
     pub tile_width: u32,
+    pub tile_height: u32,
     pub tiles_x: u32,
     pub tiles_y: u32,
     pub visible_splats: u32,
@@ -142,6 +141,8 @@ pub(crate) struct RasterCensusInput<'a> {
     pub request: RasterCensusRequest,
     pub img_size: UVec2,
     pub tile_bounds: UVec2,
+    pub tile_width: u32,
+    pub tile_height: u32,
     pub num_visible: u32,
     pub num_intersections: u32,
     pub smooth_cutoff: bool,
@@ -245,6 +246,9 @@ fn validate_offsets(
 }
 
 pub(crate) fn analyze(input: &RasterCensusInput<'_>) -> Result<RasterCensusReport, String> {
+    if input.tile_width == 0 || input.tile_height == 0 {
+        return Err("raster census tile dimensions must be at least 1".to_owned());
+    }
     let num_tiles = (input.tile_bounds.x as usize)
         .checked_mul(input.tile_bounds.y as usize)
         .ok_or_else(|| "tile count overflow".to_owned())?;
@@ -335,10 +339,10 @@ pub(crate) fn analyze(input: &RasterCensusInput<'_>) -> Result<RasterCensusRepor
         let mut contributed = vec![false; entry_count];
         let tile_x = tile_id as u32 % input.tile_bounds.x;
         let tile_y = tile_id as u32 / input.tile_bounds.x;
-        let min_x = tile_x * TILE_WIDTH;
-        let min_y = tile_y * TILE_WIDTH;
-        let max_x = (min_x + TILE_WIDTH).min(input.img_size.x);
-        let max_y = (min_y + TILE_WIDTH).min(input.img_size.y);
+        let min_x = tile_x * input.tile_width;
+        let min_y = tile_y * input.tile_height;
+        let max_x = (min_x + input.tile_width).min(input.img_size.x);
+        let max_y = (min_y + input.tile_height).min(input.img_size.y);
         let valid_pixels = u64::from(max_x - min_x) * u64::from(max_y - min_y);
 
         sampled.sampled_intersections += entry_count as u64;
@@ -440,7 +444,8 @@ pub(crate) fn analyze(input: &RasterCensusInput<'_>) -> Result<RasterCensusRepor
         sequence: input.request.sequence,
         image_width: input.img_size.x,
         image_height: input.img_size.y,
-        tile_width: TILE_WIDTH,
+        tile_width: input.tile_width,
+        tile_height: input.tile_height,
         tiles_x: input.tile_bounds.x,
         tiles_y: input.tile_bounds.y,
         visible_splats: input.num_visible,
@@ -508,6 +513,8 @@ mod tests {
             },
             img_size: glam::uvec2(32, 16),
             tile_bounds: glam::uvec2(2, 1),
+            tile_width: 16,
+            tile_height: 16,
             num_visible: 2,
             num_intersections: 3,
             smooth_cutoff: false,
@@ -546,6 +553,8 @@ mod tests {
             },
             img_size: glam::uvec2(1, 1),
             tile_bounds: glam::uvec2(1, 1),
+            tile_width: 16,
+            tile_height: 16,
             num_visible: 3,
             num_intersections: 3,
             smooth_cutoff: false,
@@ -565,5 +574,35 @@ mod tests {
         assert_eq!(report.sampled.zero_contribution_intersections, 2);
         assert_eq!(report.sampled.cpu_post_intersections, 2);
         assert_eq!(report.sampled.range_end_mismatches, 0);
+    }
+
+    #[test]
+    fn sampled_replay_uses_rectangular_tile_height() {
+        let projected = [[0.5, 12.5, 1.0, 0.0, 1.0, 0.5, 1.0, 1.0, 1.0]].concat();
+        let compact = [0];
+        let offsets = [0, 0, 0, 1];
+        let report = analyze(&RasterCensusInput {
+            request: RasterCensusRequest {
+                sequence: 0,
+                sample_tiles: 2,
+            },
+            img_size: glam::uvec2(16, 16),
+            tile_bounds: glam::uvec2(1, 2),
+            tile_width: 16,
+            tile_height: 8,
+            num_visible: 1,
+            num_intersections: 1,
+            smooth_cutoff: false,
+            pre_offsets: &offsets,
+            post_offsets: &offsets,
+            compact_gid_from_isect: &compact,
+            projected_splats: &projected,
+        })
+        .expect("valid rectangular census");
+
+        assert_eq!(report.tile_width, 16);
+        assert_eq!(report.tile_height, 8);
+        assert_eq!(report.sampled.sampled_tiles, 2);
+        assert_eq!(report.sampled.potential_pairs, 128);
     }
 }

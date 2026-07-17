@@ -13,7 +13,7 @@ use crate::{
 };
 use brush_cube::{MainBackendBase, Runtime};
 use burn::{
-    backend::ops::FloatTensorOps,
+    backend::{TensorMetadata, ops::FloatTensorOps},
     tensor::{DType, TensorData},
 };
 use burn_wgpu::{CubeTensor, WgpuDevice, WgpuRuntime};
@@ -159,7 +159,11 @@ async fn read_f32(tensor: CubeTensor<WgpuRuntime>) -> Vec<f32> {
     data.as_slice::<f32>().expect("f32 tensor").to_vec()
 }
 
-async fn render_test_scene(rasterizer: Rasterizer, pass: RasterPass) -> (Vec<f32>, Vec<f32>, u32) {
+async fn render_test_scene(
+    rasterizer: Rasterizer,
+    pass: RasterPass,
+    img_size: UVec2,
+) -> (Vec<f32>, Vec<f32>, u32, [usize; 3]) {
     let device = brush_cube::test_helpers::test_device().await;
     let camera = Camera::new(
         glam::vec3(0.0, 0.0, -3.0),
@@ -169,8 +173,6 @@ async fn render_test_scene(rasterizer: Rasterizer, pass: RasterPass) -> (Vec<f32
         glam::vec2(0.5, 0.5),
         CameraModel::Pinhole,
     );
-    let img_size = glam::uvec2(23, 19);
-
     let means = [
         [0.00, 0.00, 0.00],
         [0.08, -0.04, 0.07],
@@ -221,10 +223,26 @@ async fn render_test_scene(rasterizer: Rasterizer, pass: RasterPass) -> (Vec<f32
     output.clone().validate().await;
 
     let num_visible = output.aux.num_visible;
+    let tile_offsets_shape = output.aux.tile_offsets.shape();
+    let tile_offsets_shape = [
+        tile_offsets_shape[0],
+        tile_offsets_shape[1],
+        tile_offsets_shape[2],
+    ];
     let image = read_f32(output.out_img).await;
     let mut projected = read_f32(output.projected_splats).await;
     projected.truncate(num_visible as usize * PROJECTED_LANES);
-    (image, projected, num_visible)
+    (image, projected, num_visible, tile_offsets_shape)
+}
+
+fn expected_tile_offsets_shape(img_size: UVec2, rasterizer: Rasterizer) -> [usize; 3] {
+    let tile_width = rasterizer.tile_width();
+    let tile_height = rasterizer.tile_height();
+    [
+        img_size.y.div_ceil(tile_height) as usize,
+        img_size.x.div_ceil(tile_width) as usize,
+        2,
+    ]
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
@@ -233,12 +251,22 @@ async fn both_selectors_match_the_independent_cpu_oracle() {
     let background = Vec3::new(0.13, 0.07, 0.19);
 
     for pass in [RasterPass::Backward, RasterPass::BackwardSmoothCutoff] {
-        let (legacy_image, legacy_projected, legacy_visible) =
-            render_test_scene(Rasterizer::Legacy, pass).await;
-        let (candidate_image, candidate_projected, candidate_visible) =
-            render_test_scene(Rasterizer::Candidate, pass).await;
+        let (legacy_image, legacy_projected, legacy_visible, legacy_tile_shape) =
+            render_test_scene(Rasterizer::Legacy, pass, img_size).await;
+        let (candidate_image, candidate_projected, candidate_visible, candidate_tile_shape) =
+            render_test_scene(Rasterizer::Candidate, pass, img_size).await;
 
         assert_eq!(candidate_visible, legacy_visible, "{pass:?} visible count");
+        assert_eq!(
+            legacy_tile_shape,
+            expected_tile_offsets_shape(img_size, Rasterizer::Legacy),
+            "{pass:?} legacy tile offsets",
+        );
+        assert_eq!(
+            candidate_tile_shape,
+            expected_tile_offsets_shape(img_size, Rasterizer::Candidate),
+            "{pass:?} candidate tile offsets",
+        );
         assert_close(
             &format!("{pass:?} selector image"),
             &candidate_image,
@@ -274,6 +302,72 @@ async fn both_selectors_match_the_independent_cpu_oracle() {
             &format!("{pass:?} candidate oracle"),
             &candidate_image,
             &candidate_reference,
+            2.0e-5,
+        );
+    }
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn selectors_match_across_tile_boundaries() {
+    let background = Vec3::new(0.13, 0.07, 0.19);
+    let pass = RasterPass::Backward;
+
+    // Below, exactly on, and beyond the 16x8 candidate boundaries. The final
+    // two cases cross the candidate and legacy grids in different ways.
+    for (img_size, distinct_tile_grids) in [
+        (glam::uvec2(15, 7), false),
+        (glam::uvec2(16, 8), false),
+        (glam::uvec2(17, 9), true),
+        (glam::uvec2(9, 17), true),
+    ] {
+        let (legacy_image, legacy_projected, legacy_visible, legacy_tile_shape) =
+            render_test_scene(Rasterizer::Legacy, pass, img_size).await;
+        let (candidate_image, candidate_projected, candidate_visible, candidate_tile_shape) =
+            render_test_scene(Rasterizer::Candidate, pass, img_size).await;
+
+        assert_eq!(
+            candidate_visible, legacy_visible,
+            "{img_size} visible count"
+        );
+        assert_eq!(
+            legacy_tile_shape,
+            expected_tile_offsets_shape(img_size, Rasterizer::Legacy),
+            "{img_size} legacy tile offsets",
+        );
+        assert_eq!(
+            candidate_tile_shape,
+            expected_tile_offsets_shape(img_size, Rasterizer::Candidate),
+            "{img_size} candidate tile offsets",
+        );
+        assert_eq!(
+            candidate_tile_shape != legacy_tile_shape,
+            distinct_tile_grids,
+            "{img_size} tile-grid distinction",
+        );
+        assert_close(
+            &format!("{img_size} selector image"),
+            &candidate_image,
+            &legacy_image,
+            1.0e-6,
+        );
+        assert_close(
+            &format!("{img_size} projected splats"),
+            &candidate_projected,
+            &legacy_projected,
+            1.0e-6,
+        );
+
+        let reference = rasterize_reference(&legacy_projected, img_size, background, false);
+        assert_close(
+            &format!("{img_size} legacy oracle"),
+            &legacy_image,
+            &reference,
+            2.0e-5,
+        );
+        assert_close(
+            &format!("{img_size} candidate oracle"),
+            &candidate_image,
+            &reference,
             2.0e-5,
         );
     }

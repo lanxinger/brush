@@ -247,60 +247,84 @@ async fn candidate_selector_preserves_forward_backward_and_aux() {
     let img_size = glam::uvec2(35, 29);
     let background = Vec3::new(0.11, 0.07, 0.19);
 
-    let legacy_splats = build_splats(&scene, &device);
-    let legacy = render_splats_with_pass_and_rasterizer(
-        legacy_splats.clone(),
-        &camera,
-        img_size,
-        background,
-        PASS,
-        Rasterizer::Legacy,
-    )
-    .await;
-    let legacy_image = read_vec(legacy.img.clone()).await;
-    let legacy_visible = read_vec(legacy.visible.clone()).await;
-    let legacy_radius = read_vec(legacy.max_radius.clone()).await;
-    let legacy_grads = legacy.img.mean().backward();
-    let legacy_transforms = read_vec(legacy_splats.transforms.grad(&legacy_grads).unwrap()).await;
-    let legacy_sh = read_vec(legacy_splats.sh_coeffs.grad(&legacy_grads).unwrap()).await;
-    let legacy_opacity = read_vec(legacy_splats.raw_opacities.grad(&legacy_grads).unwrap()).await;
+    for pass in [RasterPass::Backward, PASS] {
+        let legacy_splats = build_splats(&scene, &device);
+        let legacy = render_splats_with_pass_and_rasterizer(
+            legacy_splats.clone(),
+            &camera,
+            img_size,
+            background,
+            pass,
+            Rasterizer::Legacy,
+        )
+        .await;
+        let legacy_image = read_vec(legacy.img.clone()).await;
+        let legacy_visible = read_vec(legacy.visible.clone()).await;
+        let legacy_radius = read_vec(legacy.max_radius.clone()).await;
+        let legacy_grads = legacy.img.mean().backward();
+        let legacy_transforms =
+            read_vec(legacy_splats.transforms.grad(&legacy_grads).unwrap()).await;
+        let legacy_sh = read_vec(legacy_splats.sh_coeffs.grad(&legacy_grads).unwrap()).await;
+        let legacy_opacity =
+            read_vec(legacy_splats.raw_opacities.grad(&legacy_grads).unwrap()).await;
 
-    let candidate_splats = build_splats(&scene, &device);
-    let candidate = render_splats_with_pass_and_rasterizer(
-        candidate_splats.clone(),
-        &camera,
-        img_size,
-        background,
-        PASS,
-        Rasterizer::Candidate,
-    )
-    .await;
-    let candidate_image = read_vec(candidate.img.clone()).await;
-    let candidate_visible = read_vec(candidate.visible.clone()).await;
-    let candidate_radius = read_vec(candidate.max_radius.clone()).await;
-    let candidate_grads = candidate.img.mean().backward();
-    let candidate_transforms =
-        read_vec(candidate_splats.transforms.grad(&candidate_grads).unwrap()).await;
-    let candidate_sh = read_vec(candidate_splats.sh_coeffs.grad(&candidate_grads).unwrap()).await;
-    let candidate_opacity = read_vec(
-        candidate_splats
-            .raw_opacities
-            .grad(&candidate_grads)
-            .unwrap(),
-    )
-    .await;
+        let candidate_splats = build_splats(&scene, &device);
+        let candidate = render_splats_with_pass_and_rasterizer(
+            candidate_splats.clone(),
+            &camera,
+            img_size,
+            background,
+            pass,
+            Rasterizer::Candidate,
+        )
+        .await;
+        let candidate_image = read_vec(candidate.img.clone()).await;
+        let candidate_visible = read_vec(candidate.visible.clone()).await;
+        let candidate_radius = read_vec(candidate.max_radius.clone()).await;
+        let candidate_grads = candidate.img.mean().backward();
+        let candidate_transforms =
+            read_vec(candidate_splats.transforms.grad(&candidate_grads).unwrap()).await;
+        let candidate_sh =
+            read_vec(candidate_splats.sh_coeffs.grad(&candidate_grads).unwrap()).await;
+        let candidate_opacity = read_vec(
+            candidate_splats
+                .raw_opacities
+                .grad(&candidate_grads)
+                .unwrap(),
+        )
+        .await;
 
-    assert_eq!(candidate.num_visible, legacy.num_visible);
-    assert_close("selector image", &candidate_image, &legacy_image);
-    assert_close("selector visibility", &candidate_visible, &legacy_visible);
-    assert_close("selector max radius", &candidate_radius, &legacy_radius);
-    assert_close(
-        "selector transforms",
-        &candidate_transforms,
-        &legacy_transforms,
-    );
-    assert_close("selector SH", &candidate_sh, &legacy_sh);
-    assert_close("selector opacity", &candidate_opacity, &legacy_opacity);
+        assert_eq!(
+            candidate.num_visible, legacy.num_visible,
+            "{pass:?} visible count"
+        );
+        assert_close(
+            &format!("{pass:?} selector image"),
+            &candidate_image,
+            &legacy_image,
+        );
+        assert_close(
+            &format!("{pass:?} selector visibility"),
+            &candidate_visible,
+            &legacy_visible,
+        );
+        assert_close(
+            &format!("{pass:?} selector max radius"),
+            &candidate_radius,
+            &legacy_radius,
+        );
+        assert_close(
+            &format!("{pass:?} selector transforms"),
+            &candidate_transforms,
+            &legacy_transforms,
+        );
+        assert_close(&format!("{pass:?} selector SH"), &candidate_sh, &legacy_sh);
+        assert_close(
+            &format!("{pass:?} selector opacity"),
+            &candidate_opacity,
+            &legacy_opacity,
+        );
+    }
 }
 
 #[cfg(all(

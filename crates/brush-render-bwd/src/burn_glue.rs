@@ -34,6 +34,20 @@ use burn_fusion::{
 use burn_ir::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
 use glam::Vec3;
 
+fn training_rasterizer() -> Rasterizer {
+    use std::sync::OnceLock;
+
+    static SELECTED: OnceLock<Rasterizer> = OnceLock::new();
+    *SELECTED.get_or_init(|| {
+        if brush_render::native_msl::fine_raster_tiles_requested() {
+            tracing::warn!("experimental 16x8 training raster tiles requested");
+            Rasterizer::Candidate
+        } else {
+            Rasterizer::Legacy
+        }
+    })
+}
+
 /// Intermediate gradients from the rasterize backward pass.
 ///
 /// Sparse buffer of shape `[num_visible, 10]`, indexed by `compact_gid`.
@@ -514,7 +528,7 @@ pub async fn render_splats_for_training(
         img_size,
         background,
         brush_render::gaussian_splats::RasterPass::Backward,
-        Rasterizer::Legacy,
+        training_rasterizer(),
         compute_refine_weight,
         defer_sh_grad,
     )

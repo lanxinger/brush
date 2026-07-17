@@ -49,16 +49,36 @@ impl RasterPass {
 
 /// Internal rasterizer implementation selector.
 ///
-/// Production entry points always use [`Rasterizer::Legacy`]. The
-/// [`Rasterizer::Candidate`] variant is an explicit same-process A/B hook for
-/// developing replacement raster pipelines; until a candidate is implemented
-/// it intentionally dispatches to the legacy path as well.
+/// Product entry points use [`Rasterizer::Legacy`] unless an experimental
+/// training-only switch explicitly requests [`Rasterizer::Candidate`]. Keeping
+/// this value explicit lets tests compare both paths in one process and makes
+/// forward/backward tile geometry impossible to infer inconsistently.
 #[doc(hidden)]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Rasterizer {
     #[default]
     Legacy,
     Candidate,
+}
+
+impl Rasterizer {
+    pub const fn tile_width(self) -> u32 {
+        match self {
+            Self::Legacy => crate::shaders::helpers::TILE_WIDTH,
+            Self::Candidate => crate::shaders::helpers::FINE_TILE_WIDTH,
+        }
+    }
+
+    pub const fn tile_height(self) -> u32 {
+        match self {
+            Self::Legacy => crate::shaders::helpers::TILE_WIDTH,
+            Self::Candidate => crate::shaders::helpers::FINE_TILE_HEIGHT,
+        }
+    }
+
+    pub const fn tile_size(self) -> u32 {
+        self.tile_width() * self.tile_height()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
