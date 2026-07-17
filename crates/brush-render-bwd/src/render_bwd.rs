@@ -28,8 +28,9 @@ fn use_unchecked_raster_bwd() -> bool {
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let enabled = std::env::var("BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let enabled = brush_render::native_msl::option_requested(
+            brush_render::native_msl::UNCHECKED_RASTER_BWD_ENV,
+        );
         if enabled {
             tracing::warn!(
                 "experimental unchecked native-MSL raster backward requested; devices without native float atomics retain bounds checks"
@@ -59,8 +60,7 @@ fn use_coalesced_sh_grad() -> bool {
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("BRUSH_NATIVE_MSL_COALESCED_SH_GRAD")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        brush_render::native_msl::option_requested(brush_render::native_msl::COALESCED_SH_GRAD_ENV)
     })
 }
 

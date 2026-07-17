@@ -54,8 +54,9 @@ fn use_saved_loss_partials() -> bool {
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let enabled = std::env::var("BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let enabled = brush_render::native_msl::option_requested(
+            brush_render::native_msl::SAVED_LOSS_PARTIALS_ENV,
+        );
         if enabled {
             tracing::warn!("experimental native-MSL saved loss partials enabled");
         }

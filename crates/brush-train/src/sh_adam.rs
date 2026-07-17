@@ -175,30 +175,40 @@ pub(crate) fn sparse_sh_adam(
     )
 }
 
-pub(crate) fn sparse_sh_adam_supported(param: &Tensor<3>) -> bool {
-    let [num_splats, coeffs, channels] = param.dims();
-    if num_splats == 0
-        || channels != 3
-        || !matches!(coeffs, 1 | 4 | 9 | 16 | 25)
-        || u32::try_from(num_splats * coeffs * channels).is_err()
-        || param.dtype() != DType::F32
-    {
+fn sh_adam_device_supported<const D: usize>(
+    param: &Tensor<D>,
+    require_non_uniform_control_flow: bool,
+) -> bool {
+    if u32::try_from(param.shape().num_elements()).is_err() || param.dtype() != DType::F32 {
         return false;
     }
     // Query the adapter that owns this tensor. Brush normally uses the default
     // device, but callers can construct splats on another Wgpu adapter; a
-    // process-global capability cache could then approve the deferred path for
-    // the wrong device and leave backward without a dense SH gradient.
+    // process-global capability cache could approve an SH path for the wrong
+    // device.
     let param = brush_render::burn_glue::unwrap_wgpu_float(param.clone());
     let client = WgpuRuntime::<AutoCompiler>::client(param.client.device());
     let properties = client.properties();
     let features = client.features();
     features.plane.contains(Plane::Ops)
-        && features.plane.contains(Plane::NonUniformControlFlow)
+        && (!require_non_uniform_control_flow
+            || features.plane.contains(Plane::NonUniformControlFlow))
         && properties.hardware.plane_size_min == PLANE_SIZE
         && properties.hardware.plane_size_max == PLANE_SIZE
         && properties.hardware.max_units_per_cube >= WORKGROUP_SIZE
         && properties.hardware.max_cube_dim.0 >= WORKGROUP_SIZE
+}
+
+pub(crate) fn fused_sh_adam_supported<const D: usize>(param: &Tensor<D>) -> bool {
+    sh_adam_device_supported(param, false)
+}
+
+pub(crate) fn sparse_sh_adam_supported(param: &Tensor<3>) -> bool {
+    let [num_splats, coeffs, channels] = param.dims();
+    num_splats > 0
+        && channels == 3
+        && matches!(coeffs, 1 | 4 | 9 | 16 | 25)
+        && sh_adam_device_supported(param, true)
 }
 
 mod kernel {

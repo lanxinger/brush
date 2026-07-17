@@ -38,8 +38,8 @@ fn use_fused_sh_adam() -> bool {
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let enabled = std::env::var("BRUSH_NATIVE_MSL_FUSED_SH_ADAM")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let enabled =
+            brush_render::native_msl::option_requested(brush_render::native_msl::FUSED_SH_ADAM_ENV);
         if enabled {
             tracing::warn!("experimental native-MSL fused SH Adam enabled");
         }
@@ -259,7 +259,7 @@ impl SimpleOptimizer for AdamScaled {
                 && momentum.moment_1.dims() == shape
                 && momentum.moment_2.dims() == reduced_shape
                 && scaling.dims() == scaling_shape;
-            if shapes_match {
+            if shapes_match && crate::sh_adam::fused_sh_adam_supported(&tensor) {
                 let next_time = momentum.time + 1;
                 let config = self.sh_adam_config(lr, next_time);
                 let (tensor, moment_1, moment_2) = crate::sh_adam::sh_adam(

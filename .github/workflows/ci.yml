@@ -136,9 +136,9 @@ jobs:
       - name: Run tests (default WGSL codegen)
         run: cargo test --all
 
-      - name: Run tests (all features, native MSL with unchecked raster pilot)
+      - name: Run tests (all features, native MSL optimization preset)
         env:
-          BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD: "1"
+          BRUSH_NATIVE_MSL_PRESET: "1"
         run: cargo test --all --all-features
 
       - name: Run doc-tests

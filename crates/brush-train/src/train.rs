@@ -61,8 +61,9 @@ fn sparse_sh_adam_requested() -> bool {
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let enabled = std::env::var("BRUSH_NATIVE_MSL_SPARSE_SH_ADAM")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let enabled = brush_render::native_msl::option_requested(
+            brush_render::native_msl::SPARSE_SH_ADAM_ENV,
+        );
         if enabled {
             tracing::warn!("experimental sparse native-MSL SH Adam enabled");
         }

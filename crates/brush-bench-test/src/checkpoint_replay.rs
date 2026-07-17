@@ -210,10 +210,6 @@ mod native {
         }
     }
 
-    fn env_enabled(name: &str) -> bool {
-        std::env::var(name).is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-    }
-
     #[tokio::main(flavor = "current_thread")]
     pub(super) async fn run() -> Result<()> {
         let args = Args::parse();
@@ -301,11 +297,21 @@ mod native {
         } else {
             "wgsl"
         };
-        let unchecked_raster_requested = env_enabled("BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD");
-        let fused_sh_adam_requested = env_enabled("BRUSH_NATIVE_MSL_FUSED_SH_ADAM");
-        let coalesced_sh_grad_requested = env_enabled("BRUSH_NATIVE_MSL_COALESCED_SH_GRAD");
-        let saved_loss_partials_requested = env_enabled("BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS");
-        let sparse_sh_adam_requested = env_enabled("BRUSH_NATIVE_MSL_SPARSE_SH_ADAM");
+        let preset_requested = brush_render::native_msl::preset_requested();
+        let unchecked_raster_requested = brush_render::native_msl::option_requested(
+            brush_render::native_msl::UNCHECKED_RASTER_BWD_ENV,
+        );
+        let fused_sh_adam_requested =
+            brush_render::native_msl::option_requested(brush_render::native_msl::FUSED_SH_ADAM_ENV);
+        let coalesced_sh_grad_requested = brush_render::native_msl::option_requested(
+            brush_render::native_msl::COALESCED_SH_GRAD_ENV,
+        );
+        let saved_loss_partials_requested = brush_render::native_msl::option_requested(
+            brush_render::native_msl::SAVED_LOSS_PARTIALS_ENV,
+        );
+        let sparse_sh_adam_requested = brush_render::native_msl::option_requested(
+            brush_render::native_msl::SPARSE_SH_ADAM_ENV,
+        );
 
         println!("checkpoint: {}", args.ply.display());
         println!("dataset: {}", args.dataset.display());
@@ -313,7 +319,7 @@ mod native {
         println!("views: {} ({})", batches.len(), view_labels.join(", "));
         println!("refinement weight: {compute_refine_weight}");
         println!(
-            "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | coalesced SH grad requested: {coalesced_sh_grad_requested} | saved loss partials requested: {saved_loss_partials_requested} | sparse SH Adam requested: {sparse_sh_adam_requested} | seed: {}",
+            "compiler: {compiler} | native MSL preset requested: {preset_requested} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | coalesced SH grad requested: {coalesced_sh_grad_requested} | saved loss partials requested: {saved_loss_partials_requested} | sparse SH Adam requested: {sparse_sh_adam_requested} | seed: {}",
             args.seed
         );
         println!(
@@ -326,7 +332,7 @@ mod native {
         );
         println!("final loss: {final_loss:.9}");
         println!(
-            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} coalesced_sh_grad_requested={coalesced_sh_grad_requested} saved_loss_partials_requested={saved_loss_partials_requested} sparse_sh_adam_requested={sparse_sh_adam_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6} final_loss={final_loss:.9}",
+            "BRUSH_REPLAY_RESULT compiler={compiler} native_msl_preset_requested={preset_requested} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} coalesced_sh_grad_requested={coalesced_sh_grad_requested} saved_loss_partials_requested={saved_loss_partials_requested} sparse_sh_adam_requested={sparse_sh_adam_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6} final_loss={final_loss:.9}",
             args.seed,
             batches.len(),
             view_labels.join(","),
