@@ -1038,6 +1038,7 @@ dependencies = [
  "getrandom 0.4.2",
  "glam",
  "tokio",
+ "tracing",
  "wasm-bindgen-test",
 ]
 

@@ -304,6 +304,7 @@ mod native {
         let unchecked_raster_requested = env_enabled("BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD");
         let fused_sh_adam_requested = env_enabled("BRUSH_NATIVE_MSL_FUSED_SH_ADAM");
         let coalesced_sh_grad_requested = env_enabled("BRUSH_NATIVE_MSL_COALESCED_SH_GRAD");
+        let saved_loss_partials_requested = env_enabled("BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS");
 
         println!("checkpoint: {}", args.ply.display());
         println!("dataset: {}", args.dataset.display());
@@ -311,7 +312,7 @@ mod native {
         println!("views: {} ({})", batches.len(), view_labels.join(", "));
         println!("refinement weight: {compute_refine_weight}");
         println!(
-            "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | coalesced SH grad requested: {coalesced_sh_grad_requested} | seed: {}",
+            "compiler: {compiler} | unchecked raster requested: {unchecked_raster_requested} | fused SH Adam requested: {fused_sh_adam_requested} | coalesced SH grad requested: {coalesced_sh_grad_requested} | saved loss partials requested: {saved_loss_partials_requested} | seed: {}",
             args.seed
         );
         println!(
@@ -324,7 +325,7 @@ mod native {
         );
         println!("final loss: {final_loss:.9}");
         println!(
-            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} coalesced_sh_grad_requested={coalesced_sh_grad_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6} final_loss={final_loss:.9}",
+            "BRUSH_REPLAY_RESULT compiler={compiler} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} coalesced_sh_grad_requested={coalesced_sh_grad_requested} saved_loss_partials_requested={saved_loss_partials_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6} final_loss={final_loss:.9}",
             args.seed,
             batches.len(),
             view_labels.join(","),

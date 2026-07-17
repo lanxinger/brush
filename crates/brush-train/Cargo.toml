@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 debug-validation = ["brush-render-bwd/debug-validation"]
 native-msl = [
+    "brush-loss/native-msl",
     "brush-render/native-msl",
     "brush-render-bwd/native-msl",
     "dep:brush-cube",

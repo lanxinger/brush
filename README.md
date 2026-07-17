@@ -82,6 +82,16 @@ unavailable:
 BRUSH_NATIVE_MSL_COALESCED_SH_GRAD=1 cargo run --release --features native-msl
 ```
 
+Tracked SSIM training can optionally save the three f32 SSIM partials from
+forward for reuse by backward. This removes the first image-load and blur pair
+from loss backward without changing its formulas, but adds a `[9, H, W]` tape
+tensor: about 71.2 MiB at 1080p and 284.8 MiB at 4K. Eval, untracked, L1-only,
+non-Apple-Silicon, and default builds continue to use the recompute path:
+
+```sh
+BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS=1 cargo run --release --features native-msl
+```
+
 ### Web
 Brush can be compiled to WASM. Run `npm run dev` to start the demo website using Next.js, see the web directory in app/brush-app/web.
 
