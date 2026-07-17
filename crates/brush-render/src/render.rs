@@ -3,7 +3,7 @@ use crate::{
     RenderAuxInner, SplatOps,
     camera::Camera,
     dim_check::DimCheck,
-    gaussian_splats::{RasterPass, SplatRenderMode},
+    gaussian_splats::{RasterPass, Rasterizer, SplatRenderMode},
     get_tile_offset::{CHECKS_PER_ITER, get_tile_offsets},
     kernels,
     render_aux::RenderOutput,
@@ -45,6 +45,7 @@ impl SplatOps for MainBackendBase {
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: RasterPass,
+        _rasterizer: Rasterizer,
     ) -> RenderOutput<Self> {
         assert!(
             img_size[0] > 0 && img_size[1] > 0,

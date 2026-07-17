@@ -1,5 +1,5 @@
 use brush_cube::{MainBackendBase, calc_cube_count_1d, create_tensor};
-use brush_render::gaussian_splats::SplatRenderMode;
+use brush_render::gaussian_splats::{Rasterizer, SplatRenderMode};
 use brush_render::kernels::types::RasterizeUniformsLaunch;
 use brush_render::sh::sh_coeffs_for_degree;
 use burn::backend::TensorMetadata;
@@ -96,6 +96,7 @@ fn rasterize_bwd_impl(
     background: Vec3,
     img_size: glam::UVec2,
     v_output: FloatTensor<MainBackendBase>,
+    _rasterizer: Rasterizer,
     smooth_cutoff: bool,
     compute_refine_weight: bool,
     trusted_forward: bool,
@@ -214,6 +215,7 @@ impl SplatBwdOps for MainBackendBase {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
+        rasterizer: Rasterizer,
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self> {
         rasterize_bwd_impl(
@@ -224,6 +226,7 @@ impl SplatBwdOps for MainBackendBase {
             background,
             img_size,
             v_output,
+            rasterizer,
             smooth_cutoff,
             true,
             false,
@@ -239,6 +242,7 @@ impl SplatBwdOps for MainBackendBase {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
+        rasterizer: Rasterizer,
         smooth_cutoff: bool,
         compute_refine_weight: bool,
     ) -> RasterizeGrads<Self> {
@@ -250,6 +254,7 @@ impl SplatBwdOps for MainBackendBase {
             background,
             img_size,
             v_output,
+            rasterizer,
             smooth_cutoff,
             compute_refine_weight,
             false,
@@ -474,6 +479,7 @@ impl InternalSplatBwdOps for MainBackendBase {
             background,
             img_size,
             v_output,
+            rasterizer,
             smooth_cutoff,
             compute_refine_weight,
         ) = input.into_parts();
@@ -485,6 +491,7 @@ impl InternalSplatBwdOps for MainBackendBase {
             background,
             img_size,
             v_output,
+            rasterizer,
             smooth_cutoff,
             compute_refine_weight,
             true,

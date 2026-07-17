@@ -18,8 +18,11 @@ use burn_wgpu::WgpuRuntime;
 use glam::Vec3;
 
 use crate::{
-    RenderAuxInner, SplatOps, camera::Camera, gaussian_splats::SplatRenderMode,
-    render_aux::RenderOutput, wgpu_kind,
+    RenderAuxInner, SplatOps,
+    camera::Camera,
+    gaussian_splats::{Rasterizer, SplatRenderMode},
+    render_aux::RenderOutput,
+    wgpu_kind,
 };
 
 /// Inner Wgpu autodiff backend (same as `Autodiff<burn::backend::Wgpu>`).
@@ -229,6 +232,7 @@ impl SplatOps for Fusion<MainBackendBase> {
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: crate::gaussian_splats::RasterPass,
+        rasterizer: Rasterizer,
     ) -> RenderOutput<Self> {
         let client = transforms.client.clone();
 
@@ -254,6 +258,7 @@ impl SplatOps for Fusion<MainBackendBase> {
             render_mode,
             background,
             pass,
+            rasterizer,
         )
         .await;
 

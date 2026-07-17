@@ -7,7 +7,7 @@ use camera::Camera;
 use clap::ValueEnum;
 use glam::Vec3;
 
-use crate::gaussian_splats::SplatRenderMode;
+use crate::gaussian_splats::{Rasterizer, SplatRenderMode};
 pub use crate::gaussian_splats::{Splats, TextureMode, render_splats};
 pub use crate::render_aux::{RenderAux, RenderAuxInner, RenderOutput};
 
@@ -78,6 +78,7 @@ pub trait SplatOps: Backend {
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: gaussian_splats::RasterPass,
+        rasterizer: Rasterizer,
     ) -> impl Future<Output = RenderOutput<Self>>;
 }
 

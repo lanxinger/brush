@@ -47,6 +47,20 @@ impl RasterPass {
     }
 }
 
+/// Internal rasterizer implementation selector.
+///
+/// Production entry points always use [`Rasterizer::Legacy`]. The
+/// [`Rasterizer::Candidate`] variant is an explicit same-process A/B hook for
+/// developing replacement raster pipelines; until a candidate is implemented
+/// it intentionally dispatches to the legacy path as well.
+#[doc(hidden)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Rasterizer {
+    #[default]
+    Legacy,
+    Candidate,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TextureMode {
     Packed,
@@ -370,6 +384,33 @@ pub async fn render_splats(
     splat_scale: Option<f32>,
     texture_mode: TextureMode,
 ) -> (Tensor<3>, RenderAux) {
+    render_splats_with_rasterizer(
+        splats,
+        camera,
+        img_size,
+        background,
+        splat_scale,
+        texture_mode,
+        Rasterizer::Legacy,
+    )
+    .await
+}
+
+/// Selector-aware render entry point for internal rasterizer parity tests.
+///
+/// Product code should use [`render_splats`], which always selects the proven
+/// legacy implementation.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn render_splats_with_rasterizer(
+    splats: Splats,
+    camera: &Camera,
+    img_size: glam::UVec2,
+    background: Vec3,
+    splat_scale: Option<f32>,
+    texture_mode: TextureMode,
+    rasterizer: Rasterizer,
+) -> (Tensor<3>, RenderAux) {
     splats.clone().validate_values().await;
 
     let sh_coeffs = splats.sh_coeffs.into_value();
@@ -420,6 +461,7 @@ pub async fn render_splats(
         render_mode,
         background,
         pass,
+        rasterizer,
     )
     .await;
 
