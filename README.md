@@ -201,6 +201,24 @@ Pass `--skip-refine-weight` to benchmark the late phase after high-gradient
 densification stops. Production training selects that path automatically at
 `--growth-stop-iter`; visibility and screen-radius refinement stats remain enabled.
 
+For post-hoc quality evaluation, render the held-out dataset views from an
+exported PLY with the standalone evaluator. Alpha interpretation is required so
+comparisons cannot silently use different masking behavior:
+
+```sh
+cargo run --release -p brush-bench-test --bin brush-eval-checkpoint --features native-msl -- \
+  --dataset /path/to/dataset \
+  --ply /path/to/checkpoint.ply \
+  --eval-split-every 20 \
+  --alpha-mode masked \
+  --save-dir /path/to/renders
+```
+
+The evaluator emits one `BRUSH_EVAL_VIEW` JSON record per held-out view and one
+aggregate `BRUSH_EVAL_RESULT` record. See the
+[egg 15k upstream-versus-macOS-preset bake-off](docs/performance/egg-15k-upstream-vs-macos-preset.md)
+for the frozen performance and quality baseline used by raster redesign work.
+
 # Acknowledgements
 
 [**gSplat**](https://github.com/nerfstudio-project/gsplat), for their reference version of the kernels

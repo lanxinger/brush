@@ -927,6 +927,7 @@ dependencies = [
  "rand 0.10.1",
  "rerun",
  "safetensors 0.7.0",
+ "serde_json",
  "tokio",
  "wasm-bindgen-test",
  "wasm-logger",

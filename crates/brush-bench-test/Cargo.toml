@@ -29,6 +29,7 @@ log.workspace = true
 burn = { workspace = true, features = ["autodiff"] }
 burn-cubecl.workspace = true
 rand.workspace = true
+serde_json.workspace = true
 
 divan = "0.1.17"
 safetensors.workspace = true
@@ -74,6 +75,10 @@ path = "src/training_bench.rs"
 [[bin]]
 name = "brush-checkpoint-replay"
 path = "src/checkpoint_replay.rs"
+
+[[bin]]
+name = "brush-eval-checkpoint"
+path = "src/eval_checkpoint.rs"
 
 [lints]
 workspace = true
