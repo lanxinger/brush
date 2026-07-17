@@ -49,10 +49,11 @@ impl RasterPass {
 
 /// Internal rasterizer implementation selector.
 ///
-/// Product entry points use [`Rasterizer::Legacy`] unless an experimental
-/// training-only switch explicitly requests [`Rasterizer::Candidate`]. Keeping
-/// this value explicit lets tests compare both paths in one process and makes
-/// forward/backward tile geometry impossible to infer inconsistently.
+/// Product rendering entry points always use [`Rasterizer::Legacy`]. The
+/// differentiable training path may select [`Rasterizer::Candidate`] through
+/// the native-MSL runtime controls. Keeping this value explicit lets tests
+/// compare both paths in one process and makes forward/backward tile geometry
+/// impossible to infer inconsistently.
 #[doc(hidden)]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Rasterizer {

@@ -40,7 +40,7 @@ fn training_rasterizer() -> Rasterizer {
     static SELECTED: OnceLock<Rasterizer> = OnceLock::new();
     *SELECTED.get_or_init(|| {
         if brush_render::native_msl::fine_raster_tiles_requested() {
-            tracing::warn!("experimental 16x8 training raster tiles requested");
+            tracing::info!("16x8 training raster tiles enabled");
             Rasterizer::Candidate
         } else {
             Rasterizer::Legacy

@@ -56,9 +56,9 @@ cargo run --release --features native-msl
 
 The same feature is available on `brush-cli` and `brush-c`. On non-Metal backends it continues to use WGSL. The compiler choice applies to the whole binary, so compare WGSL and MSL with separate builds.
 
-On Apple Silicon, one runtime preset requests all five retained native-MSL
-training optimizations. Compile native MSL into the binary once, then enable the
-preset when launching it:
+On Apple Silicon, one runtime preset requests all six retained native-MSL
+training optimizations. Compile native MSL into the binary once, then enable
+the preset when launching it:
 
 ```sh
 cargo build --release --features native-msl
@@ -72,6 +72,7 @@ The preset is equivalent to setting these individual options to `1`:
 - `BRUSH_NATIVE_MSL_COALESCED_SH_GRAD`
 - `BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS`
 - `BRUSH_NATIVE_MSL_SPARSE_SH_ADAM`
+- `BRUSH_NATIVE_MSL_FINE_RASTER_TILES`
 
 Each option remains subject to its compile-time, tensor-shape, and device
 capability checks; unsupported cases retain the existing implementation. An
@@ -89,22 +90,31 @@ Only `1` and case-insensitive `true` enable a switch. `0`, case-insensitive
 individual options are off by default, and have no effect unless the required
 native-MSL build and platform gates are present.
 
-An experimental 16x8 training rasterizer can be selected independently on
-Apple Silicon native-MSL builds:
+The preset selects the 16x8 training rasterizer on Apple Silicon native-MSL
+builds. It replaces the 16x16 tile geometry for the forward, map, raster, and
+backward training passes as one unit; product rendering entry points continue
+to use 16x16 tiles. The standalone option remains available without the rest
+of the preset:
 
 ```sh
 BRUSH_NATIVE_MSL_FINE_RASTER_TILES=1 cargo run --release --features native-msl
 ```
 
-This switch is intentionally not part of `BRUSH_NATIVE_MSL_PRESET`. It replaces
-the production 16x16 tile geometry for the forward, map, raster, and backward
-passes as one unit. Fine tiles alone retain bounds checks in raster backward;
-the existing `BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD` option also applies to the
-candidate when separately requested or inherited from the preset. Product render
-entry points and ordinary training continue to use 16x16 tiles when the switch
-is absent. The performance and memory gates are recorded in the
-[fine-tile results](docs/performance/egg-raster-fine-tile-results.md); keep 16x8
-experimental until the remaining full 15k quality bake-off and longer soak pass.
+Fine tiles alone retain bounds checks in raster backward; the full preset also
+requests `BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD` and uses the same
+host-validated unchecked launch contract as 16x16. To isolate the old geometry
+or work around a device-specific issue, explicitly disable fine tiles while
+retaining the rest of the preset:
+
+```sh
+BRUSH_NATIVE_MSL_PRESET=1 \
+BRUSH_NATIVE_MSL_FINE_RASTER_TILES=0 \
+./target/release/brush
+```
+
+The 16x8 performance, memory, gradient, six-run 15k quality, and 30k stability
+gates are recorded in the
+[fine-tile results](docs/performance/egg-raster-fine-tile-results.md).
 
 Native-MSL builds also expose an experimental, off-by-default raster-backward path without generated buffer bounds checks. It relies on the renderer's tile/range invariants and requires native float atomics (otherwise it falls back to the checked path), so use it for controlled benchmarking and soaks rather than production builds:
 

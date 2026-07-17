@@ -69,11 +69,11 @@ pub const fn option_requested(_option_env: &str) -> bool {
     false
 }
 
-/// Whether the experimental 16x8 training rasterizer was explicitly requested.
+/// Whether the 16x8 training rasterizer was requested.
 ///
-/// Unlike the retained native-MSL options, this candidate never inherits
-/// [`PRESET_ENV`]. It must be enabled independently while it is under
-/// correctness and performance evaluation.
+/// An explicit [`FINE_RASTER_TILES_ENV`] value wins over [`PRESET_ENV`], like
+/// the other native-MSL options. Compile-time and platform gates still keep
+/// this training-only specialization on supported Apple Silicon builds.
 #[cfg(all(
     feature = "native-msl",
     target_os = "macos",
@@ -81,9 +81,7 @@ pub const fn option_requested(_option_env: &str) -> bool {
     not(target_family = "wasm")
 ))]
 pub fn fine_raster_tiles_requested() -> bool {
-    std::env::var_os(FINE_RASTER_TILES_ENV)
-        .as_deref()
-        .is_some_and(value_enabled)
+    option_requested(FINE_RASTER_TILES_ENV)
 }
 
 #[cfg(not(all(
