@@ -14,7 +14,7 @@ use burn_cubecl::kernel::into_contiguous;
 use burn_wgpu::WgpuRuntime;
 use glam::{Vec3, uvec2};
 
-use crate::burn_glue::{RasterizeGrads, SplatBwdOps, SplatGrads};
+use crate::burn_glue::{DeferredSplatGrads, RasterizeGrads, SplatBwdOps, SplatGrads};
 use crate::kernels;
 use brush_render::shaders::helpers::ProjectUniforms;
 
@@ -358,6 +358,63 @@ impl SplatBwdOps for MainBackendBase {
         SplatGrads {
             v_transforms,
             v_coeffs,
+            v_raw_opac,
+            v_refine_weight,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_bwd_deferred_sh(
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opac: FloatTensor<Self>,
+        global_from_compact_gid: IntTensor<Self>,
+        project_uniforms: ProjectUniforms,
+        render_mode: SplatRenderMode,
+        v_combined: FloatTensor<Self>,
+    ) -> DeferredSplatGrads<Self> {
+        let _span = tracing::trace_span!("project_bwd_deferred_sh").entered();
+        let transforms = into_contiguous(transforms);
+        let sh_coeffs = into_contiguous(sh_coeffs);
+        let raw_opac = into_contiguous(raw_opac);
+        let device = transforms.device.clone();
+        let num_points = transforms.shape()[0];
+        let client = transforms.client.clone();
+
+        let v_transforms = Self::float_zeros([num_points, 10].into(), &device, FloatDType::F32);
+        // ProjectBackwards takes the coefficient output as a storage binding,
+        // but the final comptime flag removes every access on this path.
+        let unused_v_coeffs = Self::float_zeros([1].into(), &device, FloatDType::F32);
+        let v_raw_opac = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
+        let v_refine_weight = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
+
+        tracing::trace_span!("ProjectBackwardsDeferredSh").in_scope(|| {
+            kernels::project_backwards::project_backwards_kernel::launch::<WgpuRuntime>(
+                &client,
+                calc_cube_count_1d(
+                    project_uniforms.num_visible,
+                    kernels::project_backwards::WG_SIZE,
+                ),
+                CubeDim::new_1d(kernels::project_backwards::WG_SIZE),
+                transforms.into_tensor_arg(),
+                sh_coeffs.into_tensor_arg(),
+                raw_opac.into_tensor_arg(),
+                global_from_compact_gid.into_tensor_arg(),
+                v_combined.into_tensor_arg(),
+                v_transforms.clone().into_tensor_arg(),
+                unused_v_coeffs.into_tensor_arg(),
+                v_raw_opac.clone().into_tensor_arg(),
+                v_refine_weight.clone().into_tensor_arg(),
+                project_uniforms.to_launch_object(),
+                matches!(render_mode, SplatRenderMode::Mip),
+                project_uniforms.sh_degree,
+                project_uniforms.camera_model,
+                true,
+            );
+        });
+
+        DeferredSplatGrads {
+            v_transforms,
             v_raw_opac,
             v_refine_weight,
         }

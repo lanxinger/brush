@@ -3,6 +3,7 @@
 use brush_cube::{MainBackend, MainBackendBase};
 use brush_render::burn_glue::{
     AutodiffMain, lift_to_autodiff, unwrap_ad_wgpu_float, wrap_ad_wgpu_float, wrap_wgpu_float,
+    wrap_wgpu_int,
 };
 use brush_render::{
     SplatOps,
@@ -23,7 +24,7 @@ use burn::{
         wgpu::WgpuRuntime,
     },
     module::Param,
-    tensor::{DType, Shape, Tensor},
+    tensor::{DType, Gradients as TensorGradients, Int, Shape, Tensor},
 };
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_fusion::{
@@ -48,6 +49,15 @@ pub struct RasterizeGrads<B: Backend> {
 pub struct SplatGrads<B: Backend> {
     pub v_transforms: FloatTensor<B>,
     pub v_coeffs: FloatTensor<B>,
+    pub v_raw_opac: FloatTensor<B>,
+    pub v_refine_weight: FloatTensor<B>,
+}
+
+/// Projection gradients when SH coefficient materialization is deferred to
+/// the optimizer. The other model gradients remain dense and unchanged.
+#[derive(Debug, Clone)]
+pub struct DeferredSplatGrads<B: Backend> {
+    pub v_transforms: FloatTensor<B>,
     pub v_raw_opac: FloatTensor<B>,
     pub v_refine_weight: FloatTensor<B>,
 }
@@ -110,6 +120,38 @@ pub trait SplatBwdOps: SplatOps {
         render_mode: SplatRenderMode,
         v_combined: FloatTensor<Self>,
     ) -> SplatGrads<Self>;
+
+    /// Projection backward without allocating or writing a dense SH
+    /// coefficient gradient. Used only by the private training bridge after
+    /// optimizer compatibility has been checked.
+    #[allow(clippy::too_many_arguments)]
+    fn project_bwd_deferred_sh(
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opac: FloatTensor<Self>,
+        global_from_compact_gid: IntTensor<Self>,
+        project_uniforms: ProjectUniforms,
+        render_mode: SplatRenderMode,
+        v_combined: FloatTensor<Self>,
+    ) -> DeferredSplatGrads<Self> {
+        // Preserve compatibility for external backend implementations. The
+        // built-in Wgpu paths override this to avoid the dense coefficient
+        // allocation; other backends may compute and discard it safely.
+        let grads = Self::project_bwd(
+            transforms,
+            sh_coeffs,
+            raw_opac,
+            global_from_compact_gid,
+            project_uniforms,
+            render_mode,
+            v_combined,
+        );
+        DeferredSplatGrads {
+            v_transforms: grads.v_transforms,
+            v_raw_opac: grads.v_raw_opac,
+            v_refine_weight: grads.v_refine_weight,
+        }
+    }
 }
 
 /// State saved during forward pass for backward computation.
@@ -136,7 +178,7 @@ struct GaussianBackwardState<B: Backend> {
 #[derive(Debug)]
 struct RenderBackwards;
 
-const NUM_BWD_ARGS: usize = 4;
+const NUM_BWD_ARGS: usize = 5;
 
 // Implement gradient registration when rendering backwards.
 impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
@@ -160,6 +202,7 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
             refine_weight,
             coeffs_parent,
             raw_opacity_parent,
+            deferred_sh_parent,
         ] = ops.parents;
         let compute_refine_weight = refine_weight.is_some();
 
@@ -175,32 +218,84 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
             compute_refine_weight,
         );
 
-        let splat_grads = B::project_bwd(
-            state.transforms,
-            state.sh_coeffs,
-            state.raw_opacity,
-            state.global_from_compact_gid,
-            state.project_uniforms,
-            state.render_mode,
-            rasterize_grads.v_combined,
-        );
+        if let Some(deferred_sh_parent) = deferred_sh_parent {
+            let compact_sh_grads = rasterize_grads.v_combined.clone();
+            let splat_grads = B::project_bwd_deferred_sh(
+                state.transforms,
+                state.sh_coeffs,
+                state.raw_opacity,
+                state.global_from_compact_gid,
+                state.project_uniforms,
+                state.render_mode,
+                rasterize_grads.v_combined,
+            );
 
-        if let Some(node) = transforms_parent {
-            grads.register::<B>(node.id, splat_grads.v_transforms);
-        }
+            if let Some(node) = transforms_parent {
+                grads.register::<B>(node.id, splat_grads.v_transforms);
+            }
+            if let Some(node) = refine_weight {
+                grads.register::<B>(node.id, splat_grads.v_refine_weight);
+            }
+            if let Some(node) = raw_opacity_parent {
+                grads.register::<B>(node.id, splat_grads.v_raw_opac);
+            }
+            grads.register::<B>(deferred_sh_parent.id, compact_sh_grads);
+        } else {
+            let splat_grads = B::project_bwd(
+                state.transforms,
+                state.sh_coeffs,
+                state.raw_opacity,
+                state.global_from_compact_gid,
+                state.project_uniforms,
+                state.render_mode,
+                rasterize_grads.v_combined,
+            );
 
-        // v_refine_weight is already dense [num_points], written by the kernel.
-        if let Some(node) = refine_weight {
-            grads.register::<B>(node.id, splat_grads.v_refine_weight);
+            if let Some(node) = transforms_parent {
+                grads.register::<B>(node.id, splat_grads.v_transforms);
+            }
+            if let Some(node) = refine_weight {
+                grads.register::<B>(node.id, splat_grads.v_refine_weight);
+            }
+            if let Some(node) = coeffs_parent {
+                grads.register::<B>(node.id, splat_grads.v_coeffs);
+            }
+            if let Some(node) = raw_opacity_parent {
+                grads.register::<B>(node.id, splat_grads.v_raw_opac);
+            }
         }
+    }
+}
 
-        if let Some(node) = coeffs_parent {
-            grads.register::<B>(node.id, splat_grads.v_coeffs);
-        }
+/// Sparse SH-gradient payload extracted after the render backward pass.
+/// Tensor clones in this payload are handle-only and preserve the exact
+/// forward-time projection inputs.
+#[doc(hidden)]
+pub struct DeferredShGrad {
+    pub compact_grads: Tensor<2>,
+    pub render_transforms: Tensor<2>,
+    pub global_from_compact_gid: Tensor<1, Int>,
+    pub project_uniforms: ProjectUniforms,
+}
 
-        if let Some(node) = raw_opacity_parent {
-            grads.register::<B>(node.id, splat_grads.v_raw_opac);
-        }
+/// Autodiff holder used to route compact raster gradients across Burn's
+/// backward boundary without assigning them to the dense SH parameter.
+#[doc(hidden)]
+pub struct DeferredShGradHandle {
+    holder: Tensor<2>,
+    render_transforms: Tensor<2>,
+    global_from_compact_gid: Tensor<1, Int>,
+    project_uniforms: ProjectUniforms,
+}
+
+impl DeferredShGradHandle {
+    pub fn take(self, grads: &mut TensorGradients) -> Option<DeferredShGrad> {
+        Some(DeferredShGrad {
+            compact_grads: self.holder.grad_remove(grads)?,
+            render_transforms: self.render_transforms,
+            global_from_compact_gid: self.global_from_compact_gid,
+            project_uniforms: self.project_uniforms,
+        })
     }
 }
 
@@ -213,6 +308,31 @@ pub struct SplatOutputDiff {
     /// Per-splat max screen radius aux — on the **inner** backend (no gradients).
     pub max_radius: Tensor<1>,
     pub refine_weight_holder: Tensor<1>,
+}
+
+/// Private cross-crate training protocol. Keeping this separate preserves the
+/// public [`SplatOutputDiff`] layout for downstream struct construction and
+/// exhaustive destructuring.
+#[doc(hidden)]
+pub struct TrainingSplatOutputDiff {
+    pub img: Tensor<3>,
+    pub num_visible: u32,
+    pub visible: Tensor<1>,
+    pub max_radius: Tensor<1>,
+    pub refine_weight_holder: Tensor<1>,
+    pub deferred_sh_grad: Option<DeferredShGradHandle>,
+}
+
+impl TrainingSplatOutputDiff {
+    fn into_public(self) -> SplatOutputDiff {
+        SplatOutputDiff {
+            img: self.img,
+            num_visible: self.num_visible,
+            visible: self.visible,
+            max_radius: self.max_radius,
+            refine_weight_holder: self.refine_weight_holder,
+        }
+    }
 }
 
 /// Equivalent to `Module::train()` for [`Splats`], routing through
@@ -271,6 +391,41 @@ pub async fn render_splats_with_refine_weight(
         background,
         brush_render::gaussian_splats::RasterPass::Backward,
         compute_refine_weight,
+        false,
+    )
+    .await
+    .into_public()
+}
+
+/// Training-only render entry point that can route compact SH gradients to a
+/// compatible optimizer. When `defer_sh_grad` is honored, backward does not
+/// populate `splats.sh_coeffs.grad()`; the caller must extract and consume
+/// `deferred_sh_grad` with that optimizer. Unsupported builds ignore the
+/// request and preserve the dense coefficient gradient.
+#[doc(hidden)]
+pub async fn render_splats_for_training(
+    splats: Splats,
+    camera: &Camera,
+    img_size: glam::UVec2,
+    background: Vec3,
+    compute_refine_weight: bool,
+    defer_sh_grad: bool,
+) -> TrainingSplatOutputDiff {
+    let defer_sh_grad = defer_sh_grad
+        && cfg!(all(
+            feature = "native-msl",
+            target_os = "macos",
+            target_arch = "aarch64",
+            not(target_family = "wasm")
+        ));
+    render_splats_with_pass_and_refine_weight(
+        splats,
+        camera,
+        img_size,
+        background,
+        brush_render::gaussian_splats::RasterPass::Backward,
+        compute_refine_weight,
+        defer_sh_grad,
     )
     .await
 }
@@ -286,8 +441,11 @@ pub async fn render_splats_with_pass(
     background: Vec3,
     pass: brush_render::gaussian_splats::RasterPass,
 ) -> SplatOutputDiff {
-    render_splats_with_pass_and_refine_weight(splats, camera, img_size, background, pass, true)
-        .await
+    render_splats_with_pass_and_refine_weight(
+        splats, camera, img_size, background, pass, true, false,
+    )
+    .await
+    .into_public()
 }
 
 async fn render_splats_with_pass_and_refine_weight(
@@ -297,7 +455,8 @@ async fn render_splats_with_pass_and_refine_weight(
     background: Vec3,
     pass: brush_render::gaussian_splats::RasterPass,
     compute_refine_weight: bool,
-) -> SplatOutputDiff {
+    defer_sh_grad: bool,
+) -> TrainingSplatOutputDiff {
     splats.clone().validate_values().await;
 
     let device = splats.device();
@@ -311,6 +470,12 @@ async fn render_splats_with_pass_and_refine_weight(
         refine_weight_holder.require_grad()
     } else {
         refine_weight_holder
+    };
+    let deferred_sh_holder = Tensor::<2>::zeros([1, 1], &device);
+    let deferred_sh_holder = if defer_sh_grad {
+        deferred_sh_holder.require_grad()
+    } else {
+        deferred_sh_holder
     };
 
     // Fold the 3D-filter floor into scales/opacity for the render. `min_scale`
@@ -329,6 +494,7 @@ async fn render_splats_with_pass_and_refine_weight(
     let sh_coeffs_ad = unwrap_ad_wgpu_float(splats.sh_coeffs.val());
     let raw_opac_ad = unwrap_ad_wgpu_float(raw_opac_val);
     let refine_weight_ad = unwrap_ad_wgpu_float(refine_weight_holder.clone());
+    let deferred_sh_ad = unwrap_ad_wgpu_float(deferred_sh_holder.clone());
 
     let prep_nodes = RenderBackwards
         .prepare::<NoCheckpointing>([
@@ -336,6 +502,7 @@ async fn render_splats_with_pass_and_refine_weight(
             refine_weight_ad.node.clone(),
             sh_coeffs_ad.node.clone(),
             raw_opac_ad.node.clone(),
+            deferred_sh_ad.node.clone(),
         ])
         .compute_bound()
         .stateful();
@@ -371,6 +538,12 @@ async fn render_splats_with_pass_and_refine_weight(
     let num_visible = output.aux.num_visible;
     let visible_inner = output.aux.visible.clone();
     let max_radius_inner = output.aux.max_radius.clone();
+    let deferred_sh_grad = defer_sh_grad.then(|| DeferredShGradHandle {
+        holder: deferred_sh_holder,
+        render_transforms: wrap_wgpu_float(transforms_inner.clone()),
+        global_from_compact_gid: wrap_wgpu_int(output.global_from_compact_gid.clone()),
+        project_uniforms: output.project_uniforms,
+    });
 
     let img_ad: FloatTensor<AutodiffMain> = match prep_nodes {
         OpsKind::Tracked(prep) => {
@@ -394,7 +567,7 @@ async fn render_splats_with_pass_and_refine_weight(
         OpsKind::UnTracked(prep) => prep.finish(output.out_img),
     };
 
-    SplatOutputDiff {
+    TrainingSplatOutputDiff {
         img: wrap_ad_wgpu_float(img_ad),
         num_visible,
         // `visible` / `max_radius` are render aux — they only feed refine
@@ -403,6 +576,7 @@ async fn render_splats_with_pass_and_refine_weight(
         visible: wrap_wgpu_float(visible_inner),
         max_radius: wrap_wgpu_float(max_radius_inner),
         refine_weight_holder,
+        deferred_sh_grad,
     }
 }
 
@@ -648,6 +822,105 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
         SplatGrads {
             v_transforms,
             v_coeffs,
+            v_raw_opac,
+            v_refine_weight,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_bwd_deferred_sh(
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opac: FloatTensor<Self>,
+        global_from_compact_gid: IntTensor<Self>,
+        project_uniforms: ProjectUniforms,
+        render_mode: SplatRenderMode,
+        v_combined: FloatTensor<Self>,
+    ) -> DeferredSplatGrads<Self> {
+        #[derive(Debug)]
+        struct CustomOp {
+            desc: CustomOpIr,
+            render_mode: SplatRenderMode,
+            project_uniforms: ProjectUniforms,
+        }
+
+        impl Operation<FusionCubeRuntime<WgpuRuntime>> for CustomOp {
+            fn execute(
+                &self,
+                h: &mut HandleContainer<FusionHandle<FusionCubeRuntime<WgpuRuntime>>>,
+            ) {
+                let (inputs, outputs) = self.desc.as_fixed();
+                let [
+                    transforms,
+                    sh_coeffs,
+                    raw_opac,
+                    global_from_compact_gid,
+                    v_combined,
+                ] = inputs;
+                let [v_transforms, v_raw_opac, v_refine_weight] = outputs;
+
+                let grads = <MainBackendBase as SplatBwdOps>::project_bwd_deferred_sh(
+                    h.get_float_tensor::<MainBackendBase>(transforms),
+                    h.get_float_tensor::<MainBackendBase>(sh_coeffs),
+                    h.get_float_tensor::<MainBackendBase>(raw_opac),
+                    h.get_int_tensor::<MainBackendBase>(global_from_compact_gid),
+                    self.project_uniforms,
+                    self.render_mode,
+                    h.get_float_tensor::<MainBackendBase>(v_combined),
+                );
+
+                h.register_float_tensor::<MainBackendBase>(&v_transforms.id, grads.v_transforms);
+                h.register_float_tensor::<MainBackendBase>(&v_raw_opac.id, grads.v_raw_opac);
+                h.register_float_tensor::<MainBackendBase>(
+                    &v_refine_weight.id,
+                    grads.v_refine_weight,
+                );
+            }
+        }
+
+        let client = transforms.client.clone();
+        let num_points = transforms.shape[0];
+        let input_tensors = [
+            transforms,
+            sh_coeffs,
+            raw_opac,
+            global_from_compact_gid,
+            v_combined,
+        ];
+        let v_transforms = TensorIr::uninit(
+            client.create_empty_handle(),
+            Shape::new([num_points, 10]),
+            DType::F32,
+        );
+        let v_raw_opac = TensorIr::uninit(
+            client.create_empty_handle(),
+            Shape::new([num_points]),
+            DType::F32,
+        );
+        let v_refine_weight = TensorIr::uninit(
+            client.create_empty_handle(),
+            Shape::new([num_points]),
+            DType::F32,
+        );
+        let desc = CustomOpIr::new(
+            "project_bwd_deferred_sh",
+            &input_tensors.map(|tensor| tensor.into_ir()),
+            &[v_transforms, v_raw_opac, v_refine_weight],
+        );
+        let [v_transforms, v_raw_opac, v_refine_weight] = client
+            .register(
+                StreamId::current(),
+                OperationIr::Custom(desc.clone()),
+                CustomOp {
+                    desc,
+                    render_mode,
+                    project_uniforms,
+                },
+            )
+            .outputs();
+
+        DeferredSplatGrads {
+            v_transforms,
             v_raw_opac,
             v_refine_weight,
         }

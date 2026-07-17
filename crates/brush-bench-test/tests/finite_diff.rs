@@ -20,6 +20,8 @@ use brush_render::{
         radial_tangential_8::RadialTangential8Params, thin_prism_fisheye::ThinPrismFisheyeParams,
     },
 };
+#[cfg(not(target_family = "wasm"))]
+use brush_render_bwd::render_splats_for_training;
 use brush_render_bwd::{render_splats_with_pass, render_splats_with_refine_weight};
 
 /// Finite-diff tests need the C^1 cutoff so analytical and numerical
@@ -231,6 +233,127 @@ async fn disabling_refine_weight_preserves_model_gradients_and_aux() {
     assert_close("opacity", &opacity_off, &opacity_on);
     assert_close("visibility", &visible_off, &visible_on);
     assert_close("max radius", &radius_off, &radius_on);
+}
+
+#[cfg(all(
+    feature = "native-msl",
+    target_os = "macos",
+    target_arch = "aarch64",
+    not(target_family = "wasm")
+))]
+#[tokio::test]
+async fn deferred_sh_bridge_preserves_other_gradients_and_aux() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let scene = base_scene();
+    let camera = std_cam();
+    let img_size = glam::uvec2(32, 32);
+
+    for compute_refine_weight in [false, true] {
+        let dense_splats = build_splats(&scene, &device);
+        let dense = render_splats_with_refine_weight(
+            dense_splats.clone(),
+            &camera,
+            img_size,
+            Vec3::ZERO,
+            compute_refine_weight,
+        )
+        .await;
+        let dense_visible = read_vec(dense.visible.clone()).await;
+        let dense_radius = read_vec(dense.max_radius.clone()).await;
+        let dense_refine_holder = dense.refine_weight_holder;
+        let dense_grads = dense.img.mean().backward();
+        let dense_transforms = read_vec(dense_splats.transforms.grad(&dense_grads).unwrap()).await;
+        let dense_opacity = read_vec(dense_splats.raw_opacities.grad(&dense_grads).unwrap()).await;
+        assert!(dense_splats.sh_coeffs.grad(&dense_grads).is_some());
+
+        let deferred_splats = build_splats(&scene, &device);
+        let deferred = render_splats_for_training(
+            deferred_splats.clone(),
+            &camera,
+            img_size,
+            Vec3::ZERO,
+            compute_refine_weight,
+            true,
+        )
+        .await;
+        let num_visible = deferred.num_visible;
+        let deferred_visible = read_vec(deferred.visible.clone()).await;
+        let deferred_radius = read_vec(deferred.max_radius.clone()).await;
+        let deferred_refine_holder = deferred.refine_weight_holder;
+        let deferred_handle = deferred
+            .deferred_sh_grad
+            .expect("deferred render must return its gradient handle");
+        let mut deferred_grads = deferred.img.mean().backward();
+        let sparse = deferred_handle
+            .take(&mut deferred_grads)
+            .expect("deferred holder gradient");
+        let deferred_transforms =
+            read_vec(deferred_splats.transforms.grad(&deferred_grads).unwrap()).await;
+        let deferred_opacity =
+            read_vec(deferred_splats.raw_opacities.grad(&deferred_grads).unwrap()).await;
+
+        assert!(deferred_splats.sh_coeffs.grad(&deferred_grads).is_none());
+        assert_eq!(
+            sparse.compact_grads.dims(),
+            [num_visible.max(1) as usize, 10]
+        );
+        assert_eq!(sparse.render_transforms.dims(), [scene.raw_opac.len(), 10]);
+        assert!(sparse.global_from_compact_gid.dims()[0] >= num_visible.max(1) as usize);
+        assert_eq!(sparse.project_uniforms.num_visible, num_visible);
+        assert_eq!(
+            sparse.project_uniforms.total_splats as usize,
+            scene.raw_opac.len()
+        );
+        assert!(
+            read_vec(sparse.compact_grads)
+                .await
+                .iter()
+                .all(|v| v.is_finite())
+        );
+
+        assert_close(
+            "deferred transforms",
+            &deferred_transforms,
+            &dense_transforms,
+        );
+        assert_close("deferred opacity", &deferred_opacity, &dense_opacity);
+        assert_close("deferred visibility", &deferred_visible, &dense_visible);
+        assert_close("deferred max radius", &deferred_radius, &dense_radius);
+        if compute_refine_weight {
+            let dense_refine = read_vec(dense_refine_holder.grad(&dense_grads).unwrap()).await;
+            let deferred_refine =
+                read_vec(deferred_refine_holder.grad(&deferred_grads).unwrap()).await;
+            assert_close("deferred refine weight", &deferred_refine, &dense_refine);
+        } else {
+            assert!(dense_refine_holder.grad(&dense_grads).is_none());
+            assert!(deferred_refine_holder.grad(&deferred_grads).is_none());
+        }
+    }
+}
+
+#[cfg(all(
+    not(target_family = "wasm"),
+    not(all(feature = "native-msl", target_os = "macos", target_arch = "aarch64"))
+))]
+#[tokio::test]
+async fn deferred_sh_request_falls_back_to_dense_off_native_msl() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let splats = build_splats(&base_scene(), &device);
+    let output = render_splats_for_training(
+        splats.clone(),
+        &std_cam(),
+        glam::uvec2(32, 32),
+        Vec3::ZERO,
+        false,
+        true,
+    )
+    .await;
+
+    assert!(output.deferred_sh_grad.is_none());
+    let grads = output.img.mean().backward();
+    assert!(splats.sh_coeffs.grad(&grads).is_some());
 }
 
 async fn analytical_at(
