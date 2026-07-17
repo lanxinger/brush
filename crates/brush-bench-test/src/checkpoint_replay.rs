@@ -72,6 +72,12 @@ mod native {
         /// Skip the refinement-only raster gradient statistic for late-phase A/B timing.
         #[arg(long)]
         skip_refine_weight: bool,
+
+        /// Analyze this many deterministic tiles per selected view during the first untimed
+        /// warmup cycle. Requires the `raster-census` Cargo feature and invalidates warmup timing.
+        #[cfg(feature = "raster-census")]
+        #[arg(long, value_name = "TILES")]
+        raster_census_tiles: Option<usize>,
     }
 
     fn validate_args(args: &Args) -> Result<()> {
@@ -92,6 +98,10 @@ mod native {
         }
         if args.eval_split_every == Some(0) {
             bail!("--eval-split-every must be at least 1");
+        }
+        #[cfg(feature = "raster-census")]
+        if args.raster_census_tiles == Some(0) {
+            bail!("--raster-census-tiles must be at least 1");
         }
         Ok(())
     }
@@ -244,6 +254,11 @@ mod native {
         let mut trainer = SplatTrainer::new(&config, &device, bounds);
 
         let compute_refine_weight = !args.skip_refine_weight;
+        #[cfg(feature = "raster-census")]
+        if let Some(sample_tiles) = args.raster_census_tiles {
+            brush_render::raster_census::request(batches.len(), sample_tiles)
+                .map_err(anyhow::Error::msg)?;
+        }
         let _ = run_steps(
             &mut trainer,
             &mut splats,

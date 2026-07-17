@@ -22,6 +22,10 @@ pub mod shaders;
 #[doc(hidden)]
 pub mod native_msl;
 
+#[cfg(feature = "raster-census")]
+#[doc(hidden)]
+pub mod raster_census;
+
 pub mod sh;
 
 #[cfg(test)]

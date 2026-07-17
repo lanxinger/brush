@@ -245,6 +245,29 @@ impl SplatOps for MainBackendBase {
                 tile_offsets.clone().into_tensor_arg(),
             );
         });
+        #[cfg(feature = "raster-census")]
+        let raster_census_capture = if bwd_info {
+            if let Some(request) = crate::raster_census::take_request() {
+                let tp = TransactionPrimitive::<Self>::new(
+                    vec![],
+                    vec![],
+                    vec![tile_offsets.clone()],
+                    vec![],
+                );
+                let data = <Self as TransactionOps<Self>>::tr_execute(tp)
+                    .await
+                    .expect("failed to read pre-raster tile offsets for raster census");
+                let pre_offsets = data.read_ints[0]
+                    .clone()
+                    .into_vec::<u32>()
+                    .expect("raster census tile offsets must be u32");
+                Some((request, pre_offsets))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let out_dim = if bwd_info { 4 } else { 1 };
         let out_img = create_tensor(
             [img_size.y as usize, img_size.x as usize, out_dim],
@@ -293,6 +316,44 @@ impl SplatOps for MainBackendBase {
                 smooth_cutoff,
             );
         });
+        #[cfg(feature = "raster-census")]
+        if let Some((request, pre_offsets)) = raster_census_capture {
+            let tp = TransactionPrimitive::<Self>::new(
+                vec![projected_splats.clone()],
+                vec![],
+                vec![compact_gid_from_isect.clone(), tile_offsets.clone()],
+                vec![],
+            );
+            let data = <Self as TransactionOps<Self>>::tr_execute(tp)
+                .await
+                .expect("failed to read raster census inputs");
+            let projected_splats_host = data.read_floats[0]
+                .clone()
+                .into_vec::<f32>()
+                .expect("raster census projected splats must be f32");
+            let compact_gid_from_isect_host = data.read_ints[0]
+                .clone()
+                .into_vec::<u32>()
+                .expect("raster census compact IDs must be u32");
+            let post_offsets = data.read_ints[1]
+                .clone()
+                .into_vec::<u32>()
+                .expect("raster census tile offsets must be u32");
+            let report = crate::raster_census::analyze(&crate::raster_census::RasterCensusInput {
+                request,
+                img_size,
+                tile_bounds,
+                num_visible,
+                num_intersections,
+                smooth_cutoff,
+                pre_offsets: &pre_offsets,
+                post_offsets: &post_offsets,
+                compact_gid_from_isect: &compact_gid_from_isect_host,
+                projected_splats: &projected_splats_host,
+            })
+            .expect("raster census analysis failed");
+            crate::raster_census::emit(&report);
+        }
         RenderOutput {
             out_img,
             aux: RenderAuxInner {

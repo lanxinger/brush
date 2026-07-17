@@ -201,6 +201,32 @@ Pass `--skip-refine-weight` to benchmark the late phase after high-gradient
 densification stops. Production training selects that path automatically at
 `--growth-stop-iter`; visibility and screen-radius refinement stats remain enabled.
 
+To inspect raster workload shape without changing any GPU kernel, build the
+replay with the diagnostics-only `raster-census` feature. The first untimed
+warmup cycle reads back the existing projected splats, intersection list, and
+tile offsets. It reports exact tile occupancy and backward atomic fan-in plus a
+deterministic CPU replay of the requested number of tiles:
+
+```sh
+cargo run --release -p brush-bench-test \
+  --bin brush-checkpoint-replay --features native-msl,raster-census -- \
+  --dataset /path/to/dataset \
+  --ply /path/to/checkpoint.ply \
+  --max-resolution 1920 \
+  --views 4 \
+  --warmup-steps 4 \
+  --steps-per-sample 4 \
+  --samples 1 \
+  --raster-census-tiles 256
+```
+
+Each view emits one `BRUSH_RASTER_CENSUS` JSON record. Census readbacks are
+synchronous and deliberately excluded from normal builds; do not use a census
+run for timing. Capture CubeCL timestamp profiles in a separate ordinary replay
+without the `raster-census` feature. The
+[egg raster workload census](docs/performance/egg-raster-workload-census.md)
+records the measurements that selected the first fine-tile candidate.
+
 For post-hoc quality evaluation, render the held-out dataset views from an
 exported PLY with the standalone evaluator. Alpha interpretation is required so
 comparisons cannot silently use different masking behavior:
