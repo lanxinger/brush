@@ -184,7 +184,7 @@ pub(crate) async fn train_stream(
     emitter.emit(ProcessMessage::DoneLoading).await;
 
     // Start with memory cleared out.
-    let client = WgpuRuntime::<AutoCompiler>::client(wgpu_device);
+    let client = WgpuRuntime::<AutoCompiler>::client(&wgpu_device);
     client.memory_cleanup();
 
     let mut eval_scene = dataset.eval;
@@ -332,7 +332,7 @@ pub(crate) async fn train_stream(
             let after = splats.num_splats();
             log::info!("LOD {current_lod}/{lod_levels}: {before} -> {after} splats");
 
-            let client = WgpuRuntime::<AutoCompiler>::client(wgpu_device);
+            let client = WgpuRuntime::<AutoCompiler>::client(&wgpu_device);
             client.memory_cleanup();
 
             dataloader = SceneLoader::new(
@@ -520,7 +520,7 @@ pub(crate) async fn train_stream(
             {
                 visualize.log_memory(
                     iter,
-                    &WgpuRuntime::<AutoCompiler>::client(wgpu_device).memory_usage()?,
+                    &WgpuRuntime::<AutoCompiler>::client(&wgpu_device).memory_usage()?,
                 )?;
             }
 

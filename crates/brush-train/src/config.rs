@@ -258,6 +258,14 @@ impl TrainConfig {
         if self.lr_mean_end > self.lr_mean {
             return Err("lr-mean-end must not exceed lr-mean".to_owned());
         }
+        if self
+            .lod_levels
+            .checked_mul(self.lod_refine_steps)
+            .and_then(|lod_iters| self.total_train_iters.checked_add(lod_iters))
+            .is_none()
+        {
+            return Err("total training and LOD iterations exceed u32::MAX".to_owned());
+        }
         Ok(())
     }
 
@@ -360,5 +368,19 @@ mod tests {
         config.total_train_iters = 1;
         config.lr_mean_end = config.lr_mean * 2.0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn validation_rejects_total_iteration_overflow() {
+        let mut config = TrainConfig::default();
+        config.total_train_iters = u32::MAX;
+        config.lod_levels = 1;
+        config.lod_refine_steps = 1;
+
+        assert_eq!(
+            config.validate(),
+            Err("total training and LOD iterations exceed u32::MAX".to_owned())
+        );
     }
 }
