@@ -154,6 +154,85 @@ pub trait SplatBwdOps: SplatOps {
     }
 }
 
+/// Raster inputs saved by this crate's forward pass.
+///
+/// The fields and constructor stay private to this module so downstream safe
+/// callers cannot claim the invariants required by the unchecked native-MSL
+/// launch. Backend implementations can only consume a value produced by the
+/// private autodiff bridge below.
+pub(crate) struct ForwardRasterBackward<B: Backend> {
+    out_img: FloatTensor<B>,
+    projected_splats: FloatTensor<B>,
+    compact_gid_from_isect: IntTensor<B>,
+    tile_offsets: IntTensor<B>,
+    background: Vec3,
+    img_size: glam::UVec2,
+    v_output: FloatTensor<B>,
+    smooth_cutoff: bool,
+    compute_refine_weight: bool,
+}
+
+impl<B: Backend> ForwardRasterBackward<B> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        out_img: FloatTensor<B>,
+        projected_splats: FloatTensor<B>,
+        compact_gid_from_isect: IntTensor<B>,
+        tile_offsets: IntTensor<B>,
+        background: Vec3,
+        img_size: glam::UVec2,
+        v_output: FloatTensor<B>,
+        smooth_cutoff: bool,
+        compute_refine_weight: bool,
+    ) -> Self {
+        Self {
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            compute_refine_weight,
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        FloatTensor<B>,
+        FloatTensor<B>,
+        IntTensor<B>,
+        IntTensor<B>,
+        Vec3,
+        glam::UVec2,
+        FloatTensor<B>,
+        bool,
+        bool,
+    ) {
+        (
+            self.out_img,
+            self.projected_splats,
+            self.compact_gid_from_isect,
+            self.tile_offsets,
+            self.background,
+            self.img_size,
+            self.v_output,
+            self.smooth_cutoff,
+            self.compute_refine_weight,
+        )
+    }
+}
+
+/// Crate-private bridge for backward work that relies on forward-produced
+/// tensor relationships. This is deliberately separate from [`SplatBwdOps`],
+/// whose safe public methods always retain kernel bounds checks.
+pub(crate) trait InternalSplatBwdOps: SplatBwdOps {
+    fn rasterize_bwd_from_forward(input: ForwardRasterBackward<Self>) -> RasterizeGrads<Self>;
+}
+
 /// State saved during forward pass for backward computation.
 #[derive(Debug, Clone)]
 struct GaussianBackwardState<B: Backend> {
@@ -181,7 +260,7 @@ struct RenderBackwards;
 const NUM_BWD_ARGS: usize = 5;
 
 // Implement gradient registration when rendering backwards.
-impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
+impl<B: Backend + InternalSplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
     type State = GaussianBackwardState<B>;
 
     fn backward(
@@ -206,7 +285,7 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
         ] = ops.parents;
         let compute_refine_weight = refine_weight.is_some();
 
-        let rasterize_grads = B::rasterize_bwd_with_refine_weight(
+        let rasterize_grads = B::rasterize_bwd_from_forward(ForwardRasterBackward::new(
             state.out_img,
             state.projected_splats,
             state.compact_gid_from_isect,
@@ -216,7 +295,7 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
             v_output,
             state.pass.smooth_cutoff(),
             compute_refine_weight,
-        );
+        ));
 
         if let Some(deferred_sh_parent) = deferred_sh_parent {
             let compact_sh_grads = rasterize_grads.v_combined.clone();
@@ -580,6 +659,115 @@ async fn render_splats_with_pass_and_refine_weight(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn rasterize_bwd_fusion(
+    out_img: FloatTensor<Fusion<MainBackendBase>>,
+    projected_splats: FloatTensor<Fusion<MainBackendBase>>,
+    compact_gid_from_isect: IntTensor<Fusion<MainBackendBase>>,
+    tile_offsets: IntTensor<Fusion<MainBackendBase>>,
+    background: Vec3,
+    img_size: glam::UVec2,
+    v_output: FloatTensor<Fusion<MainBackendBase>>,
+    smooth_cutoff: bool,
+    compute_refine_weight: bool,
+    trusted_forward: bool,
+) -> RasterizeGrads<Fusion<MainBackendBase>> {
+    #[derive(Debug)]
+    struct CustomOp {
+        desc: CustomOpIr,
+        background: Vec3,
+        img_size: glam::UVec2,
+        smooth_cutoff: bool,
+        compute_refine_weight: bool,
+        trusted_forward: bool,
+    }
+
+    impl Operation<FusionCubeRuntime<WgpuRuntime>> for CustomOp {
+        fn execute(&self, h: &mut HandleContainer<FusionHandle<FusionCubeRuntime<WgpuRuntime>>>) {
+            let (inputs, outputs) = self.desc.as_fixed();
+
+            let [
+                v_output,
+                out_img,
+                projected_splats,
+                compact_gid_from_isect,
+                tile_offsets,
+            ] = inputs;
+
+            let [v_combined] = outputs;
+
+            let grads = if self.trusted_forward {
+                <MainBackendBase as InternalSplatBwdOps>::rasterize_bwd_from_forward(
+                    ForwardRasterBackward::new(
+                        h.get_float_tensor::<MainBackendBase>(out_img),
+                        h.get_float_tensor::<MainBackendBase>(projected_splats),
+                        h.get_int_tensor::<MainBackendBase>(compact_gid_from_isect),
+                        h.get_int_tensor::<MainBackendBase>(tile_offsets),
+                        self.background,
+                        self.img_size,
+                        h.get_float_tensor::<MainBackendBase>(v_output),
+                        self.smooth_cutoff,
+                        self.compute_refine_weight,
+                    ),
+                )
+            } else {
+                <MainBackendBase as SplatBwdOps>::rasterize_bwd_with_refine_weight(
+                    h.get_float_tensor::<MainBackendBase>(out_img),
+                    h.get_float_tensor::<MainBackendBase>(projected_splats),
+                    h.get_int_tensor::<MainBackendBase>(compact_gid_from_isect),
+                    h.get_int_tensor::<MainBackendBase>(tile_offsets),
+                    self.background,
+                    self.img_size,
+                    h.get_float_tensor::<MainBackendBase>(v_output),
+                    self.smooth_cutoff,
+                    self.compute_refine_weight,
+                )
+            };
+
+            h.register_float_tensor::<MainBackendBase>(&v_combined.id, grads.v_combined);
+        }
+    }
+
+    // projected_splats is [num_visible, PROJECTED_LANES], so shape[0] gives num_visible.
+    let num_visible_val = projected_splats.shape()[0] as u32;
+
+    let client = v_output.client.clone();
+    let num_visible = (num_visible_val as usize).max(1);
+    let input_tensors = [
+        v_output,
+        out_img,
+        projected_splats,
+        compact_gid_from_isect,
+        tile_offsets,
+    ];
+    let v_combined_out = TensorIr::uninit(
+        client.create_empty_handle(),
+        Shape::new([num_visible, 10]),
+        DType::F32,
+    );
+    let desc = CustomOpIr::new(
+        "rasterize_bwd",
+        &input_tensors.map(|tensor| tensor.into_ir()),
+        &[v_combined_out],
+    );
+    let [v_combined] = client
+        .register(
+            StreamId::current(),
+            OperationIr::Custom(desc.clone()),
+            CustomOp {
+                desc,
+                background,
+                img_size,
+                smooth_cutoff,
+                compute_refine_weight,
+                trusted_forward,
+            },
+        )
+        .outputs();
+
+    RasterizeGrads { v_combined }
+}
+
 impl SplatBwdOps for Fusion<MainBackendBase> {
     #[allow(clippy::too_many_arguments)]
     fn rasterize_bwd(
@@ -592,7 +780,7 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
         v_output: FloatTensor<Self>,
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self> {
-        Self::rasterize_bwd_with_refine_weight(
+        rasterize_bwd_fusion(
             out_img,
             projected_splats,
             compact_gid_from_isect,
@@ -602,6 +790,7 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
             v_output,
             smooth_cutoff,
             true,
+            false,
         )
     }
 
@@ -617,89 +806,18 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
         smooth_cutoff: bool,
         compute_refine_weight: bool,
     ) -> RasterizeGrads<Self> {
-        #[derive(Debug)]
-        struct CustomOp {
-            desc: CustomOpIr,
-            background: Vec3,
-            img_size: glam::UVec2,
-            smooth_cutoff: bool,
-            compute_refine_weight: bool,
-        }
-
-        impl Operation<FusionCubeRuntime<WgpuRuntime>> for CustomOp {
-            fn execute(
-                &self,
-                h: &mut HandleContainer<FusionHandle<FusionCubeRuntime<WgpuRuntime>>>,
-            ) {
-                let (inputs, outputs) = self.desc.as_fixed();
-
-                let [
-                    v_output,
-                    out_img,
-                    projected_splats,
-                    compact_gid_from_isect,
-                    tile_offsets,
-                ] = inputs;
-
-                let [v_combined] = outputs;
-
-                let grads = <MainBackendBase as SplatBwdOps>::rasterize_bwd_with_refine_weight(
-                    h.get_float_tensor::<MainBackendBase>(out_img),
-                    h.get_float_tensor::<MainBackendBase>(projected_splats),
-                    h.get_int_tensor::<MainBackendBase>(compact_gid_from_isect),
-                    h.get_int_tensor::<MainBackendBase>(tile_offsets),
-                    self.background,
-                    self.img_size,
-                    h.get_float_tensor::<MainBackendBase>(v_output),
-                    self.smooth_cutoff,
-                    self.compute_refine_weight,
-                );
-
-                h.register_float_tensor::<MainBackendBase>(&v_combined.id, grads.v_combined);
-            }
-        }
-
-        // projected_splats is [num_visible, PROJECTED_LANES], so shape[0] gives num_visible.
-        let num_visible_val = projected_splats.shape()[0] as u32;
-
-        let client = v_output.client.clone();
-        let num_visible = (num_visible_val as usize).max(1);
-
-        let input_tensors = [
-            v_output,
+        rasterize_bwd_fusion(
             out_img,
             projected_splats,
             compact_gid_from_isect,
             tile_offsets,
-        ];
-
-        let outputs = {
-            let v_combined_out = TensorIr::uninit(
-                client.create_empty_handle(),
-                Shape::new([num_visible, 10]),
-                DType::F32,
-            );
-            let stream = StreamId::current();
-            let desc = CustomOpIr::new(
-                "rasterize_bwd",
-                &input_tensors.map(|t| t.into_ir()),
-                &[v_combined_out],
-            );
-            let op = CustomOp {
-                desc: desc.clone(),
-                background,
-                img_size,
-                smooth_cutoff,
-                compute_refine_weight,
-            };
-            client
-                .register(stream, OperationIr::Custom(desc), op)
-                .outputs()
-        };
-
-        let [v_combined] = outputs;
-
-        RasterizeGrads { v_combined }
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            compute_refine_weight,
+            false,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -924,5 +1042,33 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
             v_raw_opac,
             v_refine_weight,
         }
+    }
+}
+
+impl InternalSplatBwdOps for Fusion<MainBackendBase> {
+    fn rasterize_bwd_from_forward(input: ForwardRasterBackward<Self>) -> RasterizeGrads<Self> {
+        let (
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            compute_refine_weight,
+        ) = input.into_parts();
+        rasterize_bwd_fusion(
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            compute_refine_weight,
+            true,
+        )
     }
 }

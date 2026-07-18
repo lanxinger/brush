@@ -14,13 +14,17 @@ use burn_cubecl::kernel::into_contiguous;
 use burn_wgpu::WgpuRuntime;
 use glam::{Vec3, uvec2};
 
-use crate::burn_glue::{DeferredSplatGrads, RasterizeGrads, SplatBwdOps, SplatGrads};
+use crate::burn_glue::{
+    DeferredSplatGrads, ForwardRasterBackward, InternalSplatBwdOps, RasterizeGrads, SplatBwdOps,
+    SplatGrads,
+};
 use crate::kernels;
 use brush_render::shaders::helpers::ProjectUniforms;
 
 #[cfg(all(
     feature = "native-msl",
     target_os = "macos",
+    target_arch = "aarch64",
     not(target_family = "wasm")
 ))]
 fn use_unchecked_raster_bwd() -> bool {
@@ -43,6 +47,7 @@ fn use_unchecked_raster_bwd() -> bool {
 #[cfg(not(all(
     feature = "native-msl",
     target_os = "macos",
+    target_arch = "aarch64",
     not(target_family = "wasm")
 )))]
 fn use_unchecked_raster_bwd() -> bool {
@@ -74,6 +79,131 @@ fn use_coalesced_sh_grad() -> bool {
     false
 }
 
+fn should_launch_unchecked(
+    hard_floats: bool,
+    unchecked_requested: bool,
+    trusted_forward: bool,
+) -> bool {
+    hard_floats && unchecked_requested && trusted_forward
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_bwd_impl(
+    out_img: FloatTensor<MainBackendBase>,
+    projected_splats: FloatTensor<MainBackendBase>,
+    compact_gid_from_isect: IntTensor<MainBackendBase>,
+    tile_offsets: IntTensor<MainBackendBase>,
+    background: Vec3,
+    img_size: glam::UVec2,
+    v_output: FloatTensor<MainBackendBase>,
+    smooth_cutoff: bool,
+    compute_refine_weight: bool,
+    trusted_forward: bool,
+) -> RasterizeGrads<MainBackendBase> {
+    let _span = tracing::trace_span!("rasterize_bwd").entered();
+
+    let v_output = into_contiguous(v_output);
+    let device = out_img.device.clone();
+    let num_visible = projected_splats.shape()[0].max(1);
+    let client = projected_splats.client.clone();
+
+    // Sparse [num_visible, 10] indexed by compact_gid.
+    let v_combined =
+        MainBackendBase::float_zeros([num_visible, 10].into(), &device, FloatDType::F32);
+
+    let tile_bounds = uvec2(
+        img_size
+            .x
+            .div_ceil(brush_render::shaders::helpers::TILE_WIDTH),
+        img_size
+            .y
+            .div_ceil(brush_render::shaders::helpers::TILE_WIDTH),
+    );
+
+    let hard_floats = client
+        .properties()
+        .atomic_type_usage(Type::atomic(Type::scalar(ElemType::Float(FloatKind::F32))))
+        .contains(AtomicUsage::Add);
+
+    let cube_count = CubeCount::Static(tile_bounds.x, tile_bounds.y, 1);
+    let cube_dim = CubeDim::new_1d(kernels::rasterize_backwards::SPLAT_BATCH);
+    let uniforms = RasterizeUniformsLaunch::new(
+        tile_bounds.x,
+        img_size.x,
+        img_size.y,
+        background.x,
+        background.y,
+        background.z,
+    );
+    let unchecked_requested = trusted_forward && use_unchecked_raster_bwd();
+    let use_unchecked = should_launch_unchecked(hard_floats, unchecked_requested, trusted_forward);
+
+    tracing::trace_span!("RasterizeBackwards").in_scope(|| {
+        use kernels::rasterize_backwards::{CasAtomicAdd, HfAtomicAdd, rasterize_backwards_kernel};
+        if use_unchecked {
+            // SAFETY: `trusted_forward` is only reachable through the opaque
+            // `ForwardRasterBackward` produced by this crate's private autodiff bridge. The
+            // forward pass guarantees two ordered offsets per launched tile, with range_hi <=
+            // compact_gid_from_isect.len(); every compact ID is below the projected/v_combined
+            // row count; projected rows have the fixed splat stride; and contiguous
+            // output/v_output buffers both contain exactly img_w * img_h * 4 values. Image and
+            // partial-batch accesses are guarded in the kernel, host tensor sizes fit its
+            // u32/usize index arithmetic, and all loops are bounded by those finite tile ranges.
+            // This path uses native float atomics, not the CAS retry loop.
+            unsafe {
+                rasterize_backwards_kernel::launch_unchecked::<HfAtomicAdd, WgpuRuntime>(
+                    &client,
+                    cube_count,
+                    cube_dim,
+                    compact_gid_from_isect.into_tensor_arg(),
+                    tile_offsets.into_tensor_arg(),
+                    projected_splats.into_tensor_arg(),
+                    out_img.into_tensor_arg(),
+                    v_output.into_tensor_arg(),
+                    v_combined.clone().into_tensor_arg(),
+                    uniforms,
+                    smooth_cutoff,
+                    compute_refine_weight,
+                );
+            }
+        } else if hard_floats {
+            rasterize_backwards_kernel::launch::<HfAtomicAdd, WgpuRuntime>(
+                &client,
+                cube_count,
+                cube_dim,
+                compact_gid_from_isect.into_tensor_arg(),
+                tile_offsets.into_tensor_arg(),
+                projected_splats.into_tensor_arg(),
+                out_img.into_tensor_arg(),
+                v_output.into_tensor_arg(),
+                v_combined.clone().into_tensor_arg(),
+                uniforms,
+                smooth_cutoff,
+                compute_refine_weight,
+            );
+        } else {
+            // Keep bounds checks for the CAS fallback: its weak-CAS retry loop does not meet
+            // CubeCL's unchecked-launch termination contract on every target.
+            rasterize_backwards_kernel::launch::<CasAtomicAdd, WgpuRuntime>(
+                &client,
+                cube_count,
+                cube_dim,
+                compact_gid_from_isect.into_tensor_arg(),
+                tile_offsets.into_tensor_arg(),
+                projected_splats.into_tensor_arg(),
+                out_img.into_tensor_arg(),
+                v_output.into_tensor_arg(),
+                v_combined.clone().into_tensor_arg(),
+                uniforms,
+                smooth_cutoff,
+                compute_refine_weight,
+            );
+        }
+    });
+
+    RasterizeGrads { v_combined }
+}
+
 impl SplatBwdOps for MainBackendBase {
     #[allow(clippy::too_many_arguments)]
     fn rasterize_bwd(
@@ -86,7 +216,7 @@ impl SplatBwdOps for MainBackendBase {
         v_output: FloatTensor<Self>,
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self> {
-        Self::rasterize_bwd_with_refine_weight(
+        rasterize_bwd_impl(
             out_img,
             projected_splats,
             compact_gid_from_isect,
@@ -96,6 +226,7 @@ impl SplatBwdOps for MainBackendBase {
             v_output,
             smooth_cutoff,
             true,
+            false,
         )
     }
 
@@ -111,106 +242,18 @@ impl SplatBwdOps for MainBackendBase {
         smooth_cutoff: bool,
         compute_refine_weight: bool,
     ) -> RasterizeGrads<Self> {
-        let _span = tracing::trace_span!("rasterize_bwd").entered();
-
-        let v_output = into_contiguous(v_output);
-        let device = out_img.device.clone();
-        let num_visible = projected_splats.shape()[0].max(1);
-        let client = projected_splats.client.clone();
-
-        // Sparse [num_visible, 10] indexed by compact_gid.
-        let v_combined = Self::float_zeros([num_visible, 10].into(), &device, FloatDType::F32);
-
-        let tile_bounds = uvec2(
-            img_size
-                .x
-                .div_ceil(brush_render::shaders::helpers::TILE_WIDTH),
-            img_size
-                .y
-                .div_ceil(brush_render::shaders::helpers::TILE_WIDTH),
-        );
-
-        let hard_floats = client
-            .properties()
-            .atomic_type_usage(Type::atomic(Type::scalar(ElemType::Float(FloatKind::F32))))
-            .contains(AtomicUsage::Add);
-
-        let cube_count = CubeCount::Static(tile_bounds.x, tile_bounds.y, 1);
-        let cube_dim = CubeDim::new_1d(kernels::rasterize_backwards::SPLAT_BATCH);
-        let uniforms = RasterizeUniformsLaunch::new(
-            tile_bounds.x,
-            img_size.x,
-            img_size.y,
-            background.x,
-            background.y,
-            background.z,
-        );
-        let use_unchecked = use_unchecked_raster_bwd();
-
-        tracing::trace_span!("RasterizeBackwards").in_scope(|| {
-            use kernels::rasterize_backwards::{
-                CasAtomicAdd, HfAtomicAdd, rasterize_backwards_kernel,
-            };
-            if hard_floats && use_unchecked {
-                // SAFETY: the forward pass guarantees two ordered offsets per launched tile,
-                // with range_hi <= compact_gid_from_isect.len(); every compact ID is below the
-                // projected/v_combined row count; projected rows have the fixed splat stride; and
-                // contiguous output/v_output buffers both contain exactly img_w * img_h * 4
-                // values. Image and partial-batch accesses are guarded in the kernel, host tensor
-                // sizes fit its u32/usize index arithmetic, and all loops are bounded by those
-                // finite tile ranges. This path uses native float atomics, not the CAS retry loop.
-                unsafe {
-                    rasterize_backwards_kernel::launch_unchecked::<HfAtomicAdd, WgpuRuntime>(
-                        &client,
-                        cube_count,
-                        cube_dim,
-                        compact_gid_from_isect.into_tensor_arg(),
-                        tile_offsets.into_tensor_arg(),
-                        projected_splats.into_tensor_arg(),
-                        out_img.into_tensor_arg(),
-                        v_output.into_tensor_arg(),
-                        v_combined.clone().into_tensor_arg(),
-                        uniforms,
-                        smooth_cutoff,
-                        compute_refine_weight,
-                    );
-                }
-            } else if hard_floats {
-                rasterize_backwards_kernel::launch::<HfAtomicAdd, WgpuRuntime>(
-                    &client,
-                    cube_count,
-                    cube_dim,
-                    compact_gid_from_isect.into_tensor_arg(),
-                    tile_offsets.into_tensor_arg(),
-                    projected_splats.into_tensor_arg(),
-                    out_img.into_tensor_arg(),
-                    v_output.into_tensor_arg(),
-                    v_combined.clone().into_tensor_arg(),
-                    uniforms,
-                    smooth_cutoff,
-                    compute_refine_weight,
-                );
-            } else {
-                // Keep bounds checks for the CAS fallback: its weak-CAS retry loop does not meet
-                // CubeCL's unchecked-launch termination contract on every target.
-                rasterize_backwards_kernel::launch::<CasAtomicAdd, WgpuRuntime>(
-                    &client,
-                    cube_count,
-                    cube_dim,
-                    compact_gid_from_isect.into_tensor_arg(),
-                    tile_offsets.into_tensor_arg(),
-                    projected_splats.into_tensor_arg(),
-                    out_img.into_tensor_arg(),
-                    v_output.into_tensor_arg(),
-                    v_combined.clone().into_tensor_arg(),
-                    uniforms,
-                    smooth_cutoff,
-                    compute_refine_weight,
-                );
-            }
-        });
-
-        RasterizeGrads { v_combined }
+        rasterize_bwd_impl(
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            compute_refine_weight,
+            false,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -418,5 +461,46 @@ impl SplatBwdOps for MainBackendBase {
             v_raw_opac,
             v_refine_weight,
         }
+    }
+}
+
+impl InternalSplatBwdOps for MainBackendBase {
+    fn rasterize_bwd_from_forward(input: ForwardRasterBackward<Self>) -> RasterizeGrads<Self> {
+        let (
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            compute_refine_weight,
+        ) = input.into_parts();
+        rasterize_bwd_impl(
+            out_img,
+            projected_splats,
+            compact_gid_from_isect,
+            tile_offsets,
+            background,
+            img_size,
+            v_output,
+            smooth_cutoff,
+            compute_refine_weight,
+            true,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_launch_unchecked;
+
+    #[test]
+    fn unchecked_launch_requires_forward_provenance_and_device_support() {
+        assert!(!should_launch_unchecked(true, true, false));
+        assert!(!should_launch_unchecked(true, false, true));
+        assert!(!should_launch_unchecked(false, true, true));
+        assert!(should_launch_unchecked(true, true, true));
     }
 }

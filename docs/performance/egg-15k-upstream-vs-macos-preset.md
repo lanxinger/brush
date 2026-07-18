@@ -16,7 +16,7 @@ build using the same protocol.
 
 ## Frozen provenance
 
-- Dataset: `/Users/markus/Downloads/GS_DATASETS/egg`
+- Dataset: egg capture (local dataset; not included in this repository)
 - Upstream commit: `3b80985709e2ec04fd6c8622a40e36473647a8e0`
 - Optimized commit: `ebf28189eea376a97ad586f082b47c9b9da251b1`
 - Upstream binary SHA-256: `eea3a3e30b0889c5070629941a80736798a43339035737684d0d84ca78504f31`
