@@ -21,7 +21,7 @@ experimental geometry. See
 
 ## Provenance
 
-- Dataset: `/Users/markus/Downloads/GS_DATASETS/egg`
+- Dataset: egg capture (local dataset; not included in this repository)
 - Branch baseline: `8d5a9d15` (`perf/macos-training-optimizations`)
 - Raster selector/oracle foundation: `21530cca`
 - Hardware: Apple M4 Pro, 16 GPU cores, 24 GiB unified memory

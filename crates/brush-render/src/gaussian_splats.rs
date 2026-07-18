@@ -9,7 +9,7 @@ use glam::Vec3;
 use tracing::trace_span;
 
 use crate::{
-    RenderAux, SplatOps,
+    RenderAux, SplatRasterizerOps,
     camera::Camera,
     sh::{sh_coeffs_for_degree, sh_degree_from_coeffs},
 };
@@ -473,7 +473,7 @@ pub async fn render_splats_with_rasterizer(
     // Route through the `#[backend_extension]`-generated `Dispatch` impl: it
     // unwraps these dispatch primitives to the Wgpu backend, runs the render,
     // and re-wraps the `RenderOutput` via its `ExtensionType` derive.
-    let output = <Dispatch as SplatOps>::render(
+    let output = <Dispatch as SplatRasterizerOps>::render_with_rasterizer(
         camera,
         img_size,
         transforms.into_dispatch(),

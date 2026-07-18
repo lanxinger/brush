@@ -20,7 +20,7 @@ use brush_cube::{MainBackendBase, Runtime};
 use brush_render::{
     RenderOutput, SplatOps,
     camera::Camera,
-    gaussian_splats::{Rasterizer, SplatRenderMode, Splats},
+    gaussian_splats::{SplatRenderMode, Splats},
     kernels::camera_model::CameraModel::Pinhole,
     shaders::helpers::TILE_WIDTH,
 };
@@ -187,7 +187,6 @@ async fn render_raw(
         mode,
         glam::Vec3::ZERO,
         brush_render::gaussian_splats::RasterPass::Forward,
-        Rasterizer::Legacy,
     )
     .await
 }

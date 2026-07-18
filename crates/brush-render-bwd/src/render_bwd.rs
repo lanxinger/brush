@@ -231,7 +231,6 @@ impl SplatBwdOps for MainBackendBase {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
-        rasterizer: Rasterizer,
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self> {
         rasterize_bwd_impl(
@@ -242,7 +241,7 @@ impl SplatBwdOps for MainBackendBase {
             background,
             img_size,
             v_output,
-            rasterizer,
+            Rasterizer::Legacy,
             smooth_cutoff,
             true,
             false,
@@ -258,7 +257,6 @@ impl SplatBwdOps for MainBackendBase {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
-        rasterizer: Rasterizer,
         smooth_cutoff: bool,
         compute_refine_weight: bool,
     ) -> RasterizeGrads<Self> {
@@ -270,7 +268,7 @@ impl SplatBwdOps for MainBackendBase {
             background,
             img_size,
             v_output,
-            rasterizer,
+            Rasterizer::Legacy,
             smooth_cutoff,
             compute_refine_weight,
             false,

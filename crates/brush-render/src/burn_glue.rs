@@ -18,7 +18,7 @@ use burn_wgpu::WgpuRuntime;
 use glam::Vec3;
 
 use crate::{
-    RenderAuxInner, SplatOps,
+    RenderAuxInner, SplatOps, SplatRasterizerOps,
     camera::Camera,
     gaussian_splats::{Rasterizer, SplatRenderMode},
     render_aux::RenderOutput,
@@ -232,6 +232,32 @@ impl SplatOps for Fusion<MainBackendBase> {
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: crate::gaussian_splats::RasterPass,
+    ) -> RenderOutput<Self> {
+        <Self as SplatRasterizerOps>::render_with_rasterizer(
+            camera,
+            img_size,
+            transforms,
+            sh_coeffs,
+            raw_opacities,
+            render_mode,
+            background,
+            pass,
+            Rasterizer::Legacy,
+        )
+        .await
+    }
+}
+
+impl SplatRasterizerOps for Fusion<MainBackendBase> {
+    async fn render_with_rasterizer(
+        camera: &Camera,
+        img_size: glam::UVec2,
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opacities: FloatTensor<Self>,
+        render_mode: SplatRenderMode,
+        background: Vec3,
+        pass: crate::gaussian_splats::RasterPass,
         rasterizer: Rasterizer,
     ) -> RenderOutput<Self> {
         let client = transforms.client.clone();
@@ -249,7 +275,7 @@ impl SplatOps for Fusion<MainBackendBase> {
             .resolve_tensor_float::<MainBackendBase>(raw_opacities);
 
         // Run the full pipeline on MainBackendBase.
-        let out = MainBackendBase::render(
+        let out = <MainBackendBase as SplatRasterizerOps>::render_with_rasterizer(
             camera,
             img_size,
             base_transforms,

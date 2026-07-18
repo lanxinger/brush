@@ -6,7 +6,7 @@ use brush_render::burn_glue::{
     wrap_wgpu_int,
 };
 use brush_render::{
-    SplatOps,
+    SplatOps, SplatRasterizerOps,
     camera::Camera,
     gaussian_splats::{Rasterizer, SplatRenderMode, Splats, fold_min_scale},
     sh::sh_coeffs_for_degree,
@@ -89,7 +89,6 @@ pub trait SplatBwdOps: SplatOps {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
-        rasterizer: Rasterizer,
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self>;
 
@@ -105,7 +104,6 @@ pub trait SplatBwdOps: SplatOps {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
-        rasterizer: Rasterizer,
         smooth_cutoff: bool,
         _compute_refine_weight: bool,
     ) -> RasterizeGrads<Self> {
@@ -117,7 +115,6 @@ pub trait SplatBwdOps: SplatOps {
             background,
             img_size,
             v_output,
-            rasterizer,
             smooth_cutoff,
         )
     }
@@ -649,7 +646,7 @@ async fn render_splats_with_pass_and_refine_weight(
         pass.bwd_info(),
         "render_splats_with_pass requires a Backward variant"
     );
-    let output = <MainBackend as SplatOps>::render(
+    let output = <MainBackend as SplatRasterizerOps>::render_with_rasterizer(
         camera,
         img_size,
         transforms_inner.clone(),
@@ -773,7 +770,6 @@ fn rasterize_bwd_fusion(
                     self.background,
                     self.img_size,
                     h.get_float_tensor::<MainBackendBase>(v_output),
-                    self.rasterizer,
                     self.smooth_cutoff,
                     self.compute_refine_weight,
                 )
@@ -834,7 +830,6 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
-        rasterizer: Rasterizer,
         smooth_cutoff: bool,
     ) -> RasterizeGrads<Self> {
         rasterize_bwd_fusion(
@@ -845,7 +840,7 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
             background,
             img_size,
             v_output,
-            rasterizer,
+            Rasterizer::Legacy,
             smooth_cutoff,
             true,
             false,
@@ -861,7 +856,6 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
         background: Vec3,
         img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
-        rasterizer: Rasterizer,
         smooth_cutoff: bool,
         compute_refine_weight: bool,
     ) -> RasterizeGrads<Self> {
@@ -873,7 +867,7 @@ impl SplatBwdOps for Fusion<MainBackendBase> {
             background,
             img_size,
             v_output,
-            rasterizer,
+            Rasterizer::Legacy,
             smooth_cutoff,
             compute_refine_weight,
             false,

@@ -82,6 +82,24 @@ pub trait SplatOps: Backend {
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: gaussian_splats::RasterPass,
+    ) -> impl Future<Output = RenderOutput<Self>>;
+}
+
+/// Internal extension used to exercise alternate rasterizer layouts without
+/// changing the stable [`SplatOps`] API.
+#[doc(hidden)]
+#[burn::backend::backend_extension(Wgpu)]
+pub trait SplatRasterizerOps: SplatOps {
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_rasterizer(
+        camera: &Camera,
+        img_size: glam::UVec2,
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opacities: FloatTensor<Self>,
+        render_mode: SplatRenderMode,
+        background: Vec3,
+        pass: gaussian_splats::RasterPass,
         rasterizer: Rasterizer,
     ) -> impl Future<Output = RenderOutput<Self>>;
 }

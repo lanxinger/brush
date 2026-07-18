@@ -1,6 +1,6 @@
 use crate::camera::calculate_jacobian_clamp_limits;
 use crate::{
-    RenderAuxInner, SplatOps,
+    RenderAuxInner, SplatOps, SplatRasterizerOps,
     camera::Camera,
     dim_check::DimCheck,
     gaussian_splats::{RasterPass, Rasterizer, SplatRenderMode},
@@ -49,6 +49,33 @@ fn calc_tile_bounds_for_dims(
 impl SplatOps for MainBackendBase {
     #[allow(clippy::too_many_arguments)]
     async fn render(
+        camera: &Camera,
+        img_size: glam::UVec2,
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opacities: FloatTensor<Self>,
+        render_mode: SplatRenderMode,
+        background: Vec3,
+        pass: RasterPass,
+    ) -> RenderOutput<Self> {
+        <Self as SplatRasterizerOps>::render_with_rasterizer(
+            camera,
+            img_size,
+            transforms,
+            sh_coeffs,
+            raw_opacities,
+            render_mode,
+            background,
+            pass,
+            Rasterizer::Legacy,
+        )
+        .await
+    }
+}
+
+impl SplatRasterizerOps for MainBackendBase {
+    #[allow(clippy::too_many_arguments)]
+    async fn render_with_rasterizer(
         camera: &Camera,
         img_size: glam::UVec2,
         transforms: FloatTensor<Self>,

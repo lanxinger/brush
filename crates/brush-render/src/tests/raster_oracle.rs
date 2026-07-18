@@ -6,7 +6,6 @@
 //! implementation and its reference.
 
 use crate::{
-    SplatOps,
     camera::Camera,
     gaussian_splats::{RasterPass, Rasterizer, SplatRenderMode},
     kernels::camera_model::CameraModel,
@@ -208,7 +207,7 @@ async fn render_test_scene(
     ];
     let raw_opacity = [3.6, 3.1, 2.8, 3.4, 3.0, 3.8];
 
-    let output = MainBackendBase::render(
+    let output = <MainBackendBase as crate::SplatRasterizerOps>::render_with_rasterizer(
         &camera,
         img_size,
         cube_tensor(&device, [means.len(), 10], &transforms),

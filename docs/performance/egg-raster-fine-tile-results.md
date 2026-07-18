@@ -2,7 +2,7 @@
 
 - Date: 2026-07-17
 - Machine: M4 Pro
-- Dataset: `/Users/markus/Downloads/GS_DATASETS/egg`
+- Dataset: egg capture (local dataset; not included in this repository)
 - Compiler: native MSL
 - Short replays: four fixed masked training views; 20 samples x 4 synchronized
   steps after 4 warmup steps, except the 2400x3200 stress pairs (5 x 4)
@@ -213,11 +213,12 @@ Algorithm-only comparison (set fine tiles to `0` and `1` in separate A/B/B/A
 processes):
 
 ```sh
+EGG_DATASET=/path/to/egg
 BRUSH_NATIVE_MSL_PRESET=1 \
 BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD=0 \
 BRUSH_NATIVE_MSL_FINE_RASTER_TILES=0 \
 ./target/release/brush-checkpoint-replay \
-  --dataset /Users/markus/Downloads/GS_DATASETS/egg \
+  --dataset "$EGG_DATASET" \
   --ply target/bench-checkpoints/egg-quality-15k-exact/egg_15000.ply \
   --max-resolution 1920 --views 4 --eval-split-every 20 \
   --alpha-mode masked --warmup-steps 4 --steps-per-sample 4 --samples 20
