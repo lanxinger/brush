@@ -278,7 +278,7 @@ mod kernels {
         loss_map[idx] = loss;
     }
 
-    /// VJP matching [`image_l1_forward_kernel`], with one independent thread
+    /// VJP matching [`image_l1_forward_kernel()`], with one independent thread
     /// per output element and no shared memory.
     #[allow(clippy::assign_op_pattern)]
     #[cube(launch)]
