@@ -43,7 +43,7 @@ mod native {
         #[arg(long, value_enum)]
         alpha_mode: AlphaMode,
 
-        /// Optional directory for rendered evaluation PNGs.
+        /// Optional directory for rendered evaluation PNG images.
         #[arg(long)]
         save_dir: Option<PathBuf>,
     }

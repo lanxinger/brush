@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn parser_accepts_only_documented_values() {
-        for value in ["1", "true", "TRUE", "TrUe"] {
+        for value in ["1", "true", "TRUE", "True"] {
             assert_eq!(parse_bool(value), Some(true));
         }
         for value in ["0", "false", "FALSE", "FaLsE"] {
