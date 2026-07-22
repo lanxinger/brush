@@ -160,6 +160,44 @@ pub struct TrainConfig {
     #[arg(long, help_heading = "Training options")]
     pub random_init_scene_scale: Option<f32>,
 
+    /// Enable the hybrid appearance model: per-camera PPISP vignetting plus a
+    /// per-view bilateral grid of exposure, color, and optional CRF payloads.
+    #[arg(
+        long,
+        help_heading = "Appearance options",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        default_value_t = false,
+        conflicts_with_all = ["bilateral_grid", "ppisp"]
+    )]
+    #[serde(default)]
+    pub ppisp_grid: bool,
+
+    /// Store only exposure in each hybrid grid cell, omitting color latents.
+    #[arg(long, help_heading = "Appearance options", default_value_t = false)]
+    #[serde(default)]
+    pub ppisp_grid_expose_only: bool,
+
+    /// Include per-cell CRF offsets in the hybrid grid payload.
+    #[arg(
+        long,
+        help_heading = "Appearance options",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        default_value_t = true
+    )]
+    #[serde(default = "default_ppisp_grid_crf")]
+    pub ppisp_grid_crf: bool,
+
+    /// Apply an additional learned per-camera CRF after the hybrid grid.
+    #[arg(long, help_heading = "Appearance options", default_value_t = false)]
+    #[serde(default)]
+    pub ppisp_crf_per_camera: bool,
+
     /// Enable per-view affine bilateral grids (BilaRF-style). Mutually exclusive
     /// with PPISP.
     #[arg(
@@ -170,7 +208,7 @@ pub struct TrainConfig {
         require_equals = true,
         default_missing_value = "true",
         default_value_t = false,
-        conflicts_with = "ppisp"
+        conflicts_with_all = ["ppisp", "ppisp_grid"]
     )]
     #[serde(default)]
     pub bilateral_grid: bool,
@@ -192,6 +230,11 @@ pub struct TrainConfig {
     #[serde(default = "default_bilagrid_tv_weight")]
     pub bilagrid_tv_weight: f32,
 
+    /// Weight of the hybrid grid's dataset-mean-to-identity regularizer.
+    #[arg(long, help_heading = "Appearance options", default_value = "10.0")]
+    #[serde(default = "default_bilagrid_mean_reg")]
+    pub bilagrid_mean_reg: f32,
+
     /// Learning rate for the bilateral grids.
     #[arg(long, help_heading = "Appearance options", default_value = "2e-3")]
     #[serde(default = "default_bilagrid_lr")]
@@ -211,6 +254,16 @@ pub struct TrainConfig {
     #[serde(default = "default_bilagrid_betas")]
     pub bilagrid_betas: Vec<f64>,
 
+    /// Hybrid grid-gradient subsampling factor; 1 disables subsampling.
+    #[arg(
+        long,
+        help_heading = "Appearance options",
+        default_value = "4",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    #[serde(default = "default_bilagrid_grad_subsample")]
+    pub bilagrid_grad_subsample: u32,
+
     /// Enable PPISP appearance compensation: per-frame exposure + color
     /// homography and per-camera vignetting + tone curve (physically
     /// plausible ISP model), applied to the render before the loss. Mutually
@@ -223,7 +276,7 @@ pub struct TrainConfig {
         require_equals = true,
         default_missing_value = "true",
         default_value_t = false,
-        conflicts_with = "bilateral_grid"
+        conflicts_with_all = ["bilateral_grid", "ppisp_grid"]
     )]
     #[serde(default)]
     pub ppisp: bool,
@@ -274,7 +327,7 @@ impl TrainConfig {
     }
 
     pub fn appearance_enabled(&self) -> bool {
-        self.bilateral_grid || self.ppisp
+        self.bilateral_grid || self.ppisp || self.ppisp_grid
     }
 }
 
@@ -299,6 +352,18 @@ fn default_bilagrid_tv_weight() -> f32 {
     10.0
 }
 
+fn default_bilagrid_mean_reg() -> f32 {
+    10.0
+}
+
+fn default_bilagrid_grad_subsample() -> u32 {
+    4
+}
+
+fn default_ppisp_grid_crf() -> bool {
+    true
+}
+
 fn default_bilagrid_lr() -> f64 {
     2e-3
 }
@@ -321,10 +386,26 @@ mod tests {
 
     #[test]
     fn cli_rejects_stacked_appearance_models() {
-        let error = TrainConfig::try_parse_from(["brush", "--bilateral-grid", "--ppisp"])
-            .err()
-            .expect("stacked appearance flags must conflict");
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        for args in [
+            ["brush", "--bilateral-grid", "--ppisp"],
+            ["brush", "--bilateral-grid", "--ppisp-grid"],
+            ["brush", "--ppisp", "--ppisp-grid"],
+        ] {
+            let error = TrainConfig::try_parse_from(args)
+                .err()
+                .expect("stacked appearance flags must conflict");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn hybrid_cli_defaults_to_full_grid_payload() {
+        let config = TrainConfig::try_parse_from(["brush", "--ppisp-grid"])
+            .expect("hybrid appearance flag should parse");
+        assert!(config.ppisp_grid);
+        assert!(!config.ppisp_grid_expose_only);
+        assert!(config.ppisp_grid_crf);
+        assert!(!config.ppisp_crf_per_camera);
     }
 
     #[test]

@@ -3,13 +3,15 @@
 //! Only the active view's bilateral-grid slice is attached to the autodiff
 //! graph. The stored grid and its Adam moments stay on the inner backend, so
 //! per-step work does not grow with the number of input views. PPISP tensors
-//! are small enough to update densely.
+//! are small enough to update densely. The hybrid pipeline uses a zero-identity
+//! PPISP payload grid plus per-camera PPISP vignetting and optional CRF.
 
 use burn::tensor::{Device, Gradients, Tensor, s};
 
 use crate::bilagrid::bilagrid_apply_inner;
-use crate::ppisp::{PpispModel, ppisp_apply_inner};
-use crate::{AppearanceConfig, BilagridModel, bilagrid_apply, bilagrid_tv_loss};
+use crate::ppisp::{PpispModel, PpispStages, ppisp_apply_inner};
+use crate::ppisp_grid::{GridPayload, ppisp_grid_apply, ppisp_grid_apply_inner};
+use crate::{AppearanceConfig, BilagridModel, GradSubsample, bilagrid_apply, bilagrid_tv_loss};
 use brush_render::burn_glue::{detach_autodiff, lift_to_autodiff};
 
 const ADAM_EPS: f64 = 1e-15;
@@ -17,6 +19,7 @@ const BILAGRID_LR_WARMUP: u32 = 1000;
 const PPISP_LR_WARMUP: u32 = 500;
 const LR_START_FACTOR: f64 = 0.01;
 const LR_FINAL_FACTOR: f64 = 0.01;
+const MEAN_EMA_PERIOD: f64 = 750.0;
 
 #[cfg(not(target_family = "wasm"))]
 const MAX_GRID_STATE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -59,10 +62,13 @@ struct GridTrainState {
     /// Global step of each view's most recent non-zero-gradient update.
     last_step: Vec<i64>,
     betas: (f64, f64),
+    /// Dataset-wide EMA of payload-channel means. Present only for the
+    /// zero-identity hybrid grid.
+    mean_ema: Option<Tensor<1>>,
 }
 
 impl GridTrainState {
-    fn new(
+    fn new_affine(
         num_views: usize,
         dims: (usize, usize, usize),
         betas: (f64, f64),
@@ -79,6 +85,28 @@ impl GridTrainState {
             grids: Some(grids),
             last_step: vec![-1; num_views],
             betas,
+            mean_ema: None,
+        }
+    }
+
+    fn new_payload(
+        num_views: usize,
+        dims: (usize, usize, usize),
+        payload: GridPayload,
+        betas: (f64, f64),
+        mean_reg: bool,
+        device: &Device,
+    ) -> Self {
+        let (gx, gy, guidance) = dims;
+        let channels = payload.channels();
+        let shape = [num_views, channels, guidance, gy, gx];
+        Self {
+            grids: Some(Tensor::zeros(shape, device)),
+            m1: Some(Tensor::zeros(shape, device)),
+            m2: Some(Tensor::zeros(shape, device)),
+            last_step: vec![-1; num_views],
+            betas,
+            mean_ema: mean_reg.then(|| Tensor::zeros([channels], device)),
         }
     }
 
@@ -158,6 +186,19 @@ impl GridTrainState {
             lr,
             self.betas,
         );
+
+        if let Some(ema) = self.mean_ema.take() {
+            let dims = grid.dims();
+            let channels = dims[1];
+            let cells = dims[2] * dims[3] * dims[4];
+            let view_mean = grid
+                .clone()
+                .reshape([channels as i32, cells as i32])
+                .mean_dim(1)
+                .reshape([channels]);
+            let beta = 1.0 - 1.0 / MEAN_EMA_PERIOD;
+            self.mean_ema = Some(ema * beta + view_mean * (1.0 - beta));
+        }
 
         self.grids = Some(grids.slice_assign(range, grid));
         self.m1 = Some(m1.slice_assign(range, m1_view));
@@ -286,8 +327,18 @@ impl PpispTrainState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PipelineMode {
+    Legacy,
+    Hybrid {
+        payload: GridPayload,
+        crf_per_camera: bool,
+    },
+}
+
 pub struct AppearanceTrainState {
     config: AppearanceConfig,
+    mode: PipelineMode,
     total_iters: u32,
     step: u32,
     grid: Option<GridTrainState>,
@@ -296,10 +347,14 @@ pub struct AppearanceTrainState {
 
 pub struct ActiveAppearance {
     view_idx: usize,
+    mode: PipelineMode,
     view_grid: Option<Tensor<5>>,
     ppisp: Option<PpispModel>,
+    mean_ema: Option<Tensor<1>>,
     tv_weight: f32,
+    mean_reg_weight: f32,
     reg_scale: f32,
+    subsample: GradSubsample,
 }
 
 impl AppearanceTrainState {
@@ -309,7 +364,7 @@ impl AppearanceTrainState {
         total_iters: u32,
         device: &Device,
     ) -> Result<Option<Self>, String> {
-        if !config.bilagrid && !config.ppisp {
+        if !config.bilagrid && !config.ppisp && !config.ppisp_grid {
             return Ok(None);
         }
         if camera_indices.is_empty() {
@@ -325,20 +380,47 @@ impl AppearanceTrainState {
         let device = device.clone().inner();
         let num_views = camera_indices.len();
         let num_cameras = camera_indices.iter().copied().max().unwrap_or(0) as usize + 1;
-        let grid = config.bilagrid.then(|| {
-            GridTrainState::new(
+        let (mode, grid, ppisp) = if config.ppisp_grid {
+            let payload = GridPayload {
+                color: config.grid_color,
+                crf: config.grid_crf,
+                vignetting: true,
+            };
+            let grid = GridTrainState::new_payload(
                 num_views,
                 config.bilagrid_dims,
+                payload,
                 config.bilagrid_betas,
+                config.bilagrid_mean_reg > 0.0,
                 &device,
+            );
+            let ppisp = PpispTrainState::new(num_cameras, num_views, camera_indices, &device);
+            (
+                PipelineMode::Hybrid {
+                    payload,
+                    crf_per_camera: config.crf_per_camera,
+                },
+                Some(grid),
+                Some(ppisp),
             )
-        });
-        let ppisp = config
-            .ppisp
-            .then(|| PpispTrainState::new(num_cameras, num_views, camera_indices, &device));
+        } else {
+            let grid = config.bilagrid.then(|| {
+                GridTrainState::new_affine(
+                    num_views,
+                    config.bilagrid_dims,
+                    config.bilagrid_betas,
+                    &device,
+                )
+            });
+            let ppisp = config
+                .ppisp
+                .then(|| PpispTrainState::new(num_cameras, num_views, camera_indices, &device));
+            (PipelineMode::Legacy, grid, ppisp)
+        };
 
         Ok(Some(Self {
             config,
+            mode,
             total_iters,
             step: 0,
             grid,
@@ -357,13 +439,21 @@ impl AppearanceTrainState {
         }
         ActiveAppearance {
             view_idx,
+            mode: self.mode,
             view_grid: self
                 .grid
                 .as_ref()
                 .map(|grid| lift_to_autodiff(grid.view_grid(view_idx)).require_grad()),
             ppisp: self.ppisp.as_ref().map(PpispTrainState::lifted),
+            mean_ema: self
+                .grid
+                .as_ref()
+                .and_then(|grid| grid.mean_ema.as_ref())
+                .map(|ema| lift_to_autodiff(ema.clone())),
             tv_weight: self.config.bilagrid_tv_weight,
+            mean_reg_weight: self.config.bilagrid_mean_reg,
             reg_scale: self.config.ppisp_reg_scale,
+            subsample: GradSubsample::for_step(self.config.grad_subsample, self.step),
         }
     }
 
@@ -403,56 +493,127 @@ impl AppearanceTrainState {
         let mut parts = Vec::new();
         if let Some(grid) = &self.grid {
             let values = grid.grids_ref().clone();
-            let lo = read(values.clone().min()).await;
-            let hi = read(values.max()).await;
-            parts.push(format!("grid range [{lo:.3}, {hi:.3}]"));
+            match self.mode {
+                PipelineMode::Hybrid { .. } => {
+                    let exposure = values.clone().slice(s![.., 0..1]);
+                    let lo = read(exposure.clone().min()).await;
+                    let hi = read(exposure.max()).await;
+                    let payload = read(values.abs().max()).await;
+                    parts.push(format!(
+                        "grid exposure [{lo:+.3}, {hi:+.3}] stops, payload |max| {payload:.3}"
+                    ));
+                }
+                PipelineMode::Legacy => {
+                    let lo = read(values.clone().min()).await;
+                    let hi = read(values.max()).await;
+                    parts.push(format!("grid range [{lo:.3}, {hi:.3}]"));
+                }
+            }
         }
         if let Some(ppisp) = &self.ppisp {
-            let exposure = ppisp.model.exposure.val();
-            let lo = read(exposure.clone().min()).await;
-            let hi = read(exposure.max()).await;
             let vignetting = read(ppisp.model.vignetting.val().abs().max()).await;
-            parts.push(format!(
-                "exposure [{lo:+.3}, {hi:+.3}] stops, vignetting |max| {vignetting:.3}"
-            ));
+            parts.push(format!("vignetting |max| {vignetting:.3}"));
+            if matches!(self.mode, PipelineMode::Legacy) {
+                let exposure = ppisp.model.exposure.val();
+                let lo = read(exposure.clone().min()).await;
+                let hi = read(exposure.max()).await;
+                parts.push(format!("exposure [{lo:+.3}, {hi:+.3}] stops"));
+            }
         }
         (!parts.is_empty()).then(|| parts.join(", "))
     }
 
     pub fn apply_eval(&self, img: Tensor<3>, view_idx: usize) -> Tensor<3> {
-        let img = match &self.ppisp {
-            Some(state) => {
-                let model = &state.model;
-                let camera_idx = model.camera_indices[view_idx] as usize;
-                ppisp_apply_inner(
-                    model.exposure.val(),
-                    model.vignetting.val(),
-                    model.color.val(),
-                    model.crf.val(),
-                    img,
-                    camera_idx,
-                    view_idx,
-                    crate::PpispStages::ALL,
-                )
+        let ppisp = self.ppisp.as_ref().map(|state| &state.model);
+        let camera_idx = |model: &PpispModel| model.camera_indices[view_idx] as usize;
+        match self.mode {
+            PipelineMode::Legacy => {
+                let img = match ppisp {
+                    Some(model) => ppisp_apply_inner(
+                        model.exposure.val(),
+                        model.vignetting.val(),
+                        model.color.val(),
+                        model.crf.val(),
+                        img,
+                        camera_idx(model),
+                        view_idx,
+                        PpispStages::ALL,
+                    ),
+                    None => img,
+                };
+                match &self.grid {
+                    Some(grid) => bilagrid_apply_inner(grid.grids_ref().clone(), img, view_idx),
+                    None => img,
+                }
             }
-            None => img,
-        };
-        match &self.grid {
-            Some(grid) => bilagrid_apply_inner(grid.grids_ref().clone(), img, view_idx),
-            None => img,
+            PipelineMode::Hybrid {
+                payload,
+                crf_per_camera,
+            } => {
+                let model = ppisp.expect("hybrid always has PPISP camera state");
+                let grid = self.grid.as_ref().expect("hybrid always has a grid");
+                let img = ppisp_grid_apply_inner(
+                    grid.grids_ref().clone(),
+                    model.vignetting.val(),
+                    img,
+                    view_idx,
+                    camera_idx(model),
+                    payload,
+                );
+                if crf_per_camera {
+                    ppisp_apply_inner(
+                        model.exposure.val(),
+                        model.vignetting.val(),
+                        model.color.val(),
+                        model.crf.val(),
+                        img,
+                        camera_idx(model),
+                        view_idx,
+                        PpispStages::CRF_ONLY,
+                    )
+                } else {
+                    img
+                }
+            }
         }
     }
 }
 
 impl ActiveAppearance {
     pub fn apply(&self, img: Tensor<3>) -> Tensor<3> {
-        let img = match &self.ppisp {
-            Some(ppisp) => ppisp.apply(img, self.view_idx),
-            None => img,
-        };
-        match &self.view_grid {
-            Some(grid) => bilagrid_apply(grid.clone(), img, 0),
-            None => img,
+        match self.mode {
+            PipelineMode::Legacy => {
+                let img = match &self.ppisp {
+                    Some(ppisp) => ppisp.apply(img, self.view_idx),
+                    None => img,
+                };
+                match &self.view_grid {
+                    Some(grid) => bilagrid_apply(grid.clone(), img, 0),
+                    None => img,
+                }
+            }
+            PipelineMode::Hybrid {
+                payload,
+                crf_per_camera,
+            } => {
+                let ppisp = self.ppisp.as_ref().expect("hybrid always has PPISP state");
+                let grid = self.view_grid.as_ref().expect("hybrid always has a grid");
+                let camera_idx = ppisp.camera_indices[self.view_idx] as usize;
+                let img = ppisp_grid_apply(
+                    grid.clone(),
+                    ppisp.vignetting.val(),
+                    img,
+                    0,
+                    camera_idx,
+                    payload,
+                    self.subsample,
+                );
+                if crf_per_camera {
+                    ppisp.apply_stages(img, self.view_idx, PpispStages::CRF_ONLY)
+                } else {
+                    img
+                }
+            }
         }
     }
 
@@ -462,6 +623,24 @@ impl ActiveAppearance {
             && self.tv_weight > 0.0
         {
             loss = Some(bilagrid_tv_loss(grid.clone()) * self.tv_weight);
+        }
+        if let (Some(grid), Some(ema)) = (&self.view_grid, &self.mean_ema)
+            && self.mean_reg_weight > 0.0
+        {
+            let dims = grid.dims();
+            let channels = dims[1];
+            let cells = dims[2] * dims[3] * dims[4];
+            let view_mean = grid
+                .clone()
+                .reshape([channels as i32, cells as i32])
+                .mean_dim(1)
+                .reshape([channels]);
+            let mean_term =
+                (ema.clone() * view_mean).sum() * (2.0 * self.mean_reg_weight / channels as f32);
+            loss = Some(match loss {
+                Some(current) => current + mean_term,
+                None => mean_term,
+            });
         }
         if let Some(ppisp) = &self.ppisp
             && self.reg_scale > 0.0
@@ -477,20 +656,23 @@ impl ActiveAppearance {
 }
 
 fn validate_config(config: &AppearanceConfig, num_views: usize) -> Result<(), String> {
-    if config.bilagrid && config.ppisp {
+    let enabled_modes =
+        u8::from(config.bilagrid) + u8::from(config.ppisp) + u8::from(config.ppisp_grid);
+    if enabled_modes > 1 {
         return Err(
-            "bilateral-grid and PPISP are alternative appearance models; enable only one"
+            "bilateral-grid, PPISP, and PPISP-grid are alternative appearance models; enable only one"
                 .to_owned(),
         );
     }
+    let grid_enabled = config.bilagrid || config.ppisp_grid;
     let (gx, gy, guidance) = config.bilagrid_dims;
-    if config.bilagrid && [gx, gy, guidance].iter().any(|dim| *dim < 2) {
+    if grid_enabled && [gx, gy, guidance].iter().any(|dim| *dim < 2) {
         return Err(format!(
             "bilagrid-dims must each be at least 2 (got {gx},{gy},{guidance})"
         ));
     }
     let (beta1, beta2) = config.bilagrid_betas;
-    if config.bilagrid
+    if grid_enabled
         && (!beta1.is_finite()
             || !beta2.is_finite()
             || !(0.0..1.0).contains(&beta1)
@@ -498,34 +680,52 @@ fn validate_config(config: &AppearanceConfig, num_views: usize) -> Result<(), St
     {
         return Err("bilagrid-betas must be finite values in [0, 1)".to_owned());
     }
-    if config.bilagrid && (!config.bilagrid_lr.is_finite() || config.bilagrid_lr <= 0.0) {
+    if grid_enabled && (!config.bilagrid_lr.is_finite() || config.bilagrid_lr <= 0.0) {
         return Err("bilagrid-lr must be finite and greater than zero".to_owned());
     }
     if !config.bilagrid_tv_weight.is_finite() || config.bilagrid_tv_weight < 0.0 {
         return Err("bilagrid-tv-weight must be finite and non-negative".to_owned());
     }
-    if config.ppisp && (!config.ppisp_lr.is_finite() || config.ppisp_lr <= 0.0) {
+    if !config.bilagrid_mean_reg.is_finite() || config.bilagrid_mean_reg < 0.0 {
+        return Err("bilagrid-mean-reg must be finite and non-negative".to_owned());
+    }
+    if config.grad_subsample == 0 {
+        return Err("bilagrid-grad-subsample must be at least 1".to_owned());
+    }
+    if (config.ppisp || config.ppisp_grid)
+        && (!config.ppisp_lr.is_finite() || config.ppisp_lr <= 0.0)
+    {
         return Err("ppisp-lr must be finite and greater than zero".to_owned());
     }
     if !config.ppisp_reg_scale.is_finite() || config.ppisp_reg_scale < 0.0 {
         return Err("ppisp-reg-scale must be finite and non-negative".to_owned());
     }
 
-    if config.bilagrid {
+    if grid_enabled {
+        let channels = if config.ppisp_grid {
+            GridPayload {
+                color: config.grid_color,
+                crf: config.grid_crf,
+                vignetting: true,
+            }
+            .channels() as u64
+        } else {
+            12
+        };
         let elements = u64::try_from(num_views)
             .ok()
-            .and_then(|n| n.checked_mul(12))
+            .and_then(|n| n.checked_mul(channels))
             .and_then(|n| n.checked_mul(gx as u64))
             .and_then(|n| n.checked_mul(gy as u64))
             .and_then(|n| n.checked_mul(guidance as u64))
-            .ok_or_else(|| "bilateral-grid dimensions overflow the addressable size".to_owned())?;
+            .ok_or_else(|| "appearance-grid dimensions overflow the addressable size".to_owned())?;
         // Parameters plus first and second Adam moments, all f32.
         let bytes = elements
             .checked_mul(3 * size_of::<f32>() as u64)
-            .ok_or_else(|| "bilateral-grid state size overflows u64".to_owned())?;
+            .ok_or_else(|| "appearance-grid state size overflows u64".to_owned())?;
         if bytes > MAX_GRID_STATE_BYTES {
             return Err(format!(
-                "bilateral-grid state would allocate {:.1} MiB, above the {:.0} MiB safety limit; reduce views or --bilagrid-dims",
+                "appearance-grid state would allocate {:.1} MiB, above the {:.0} MiB safety limit; reduce views or --bilagrid-dims",
                 bytes as f64 / (1024.0 * 1024.0),
                 MAX_GRID_STATE_BYTES as f64 / (1024.0 * 1024.0),
             ));
@@ -542,7 +742,7 @@ mod tests {
     async fn lazy_grid_adam_matches_dense_adam_with_scheduled_lr() {
         let device = Device::from(brush_cube::test_helpers::test_device().await);
         let betas = (0.9f64, 0.999f64);
-        let mut state = GridTrainState::new(3, (2, 2, 2), betas, &device);
+        let mut state = GridTrainState::new_affine(3, (2, 2, 2), betas, &device);
         let base_lr = 2e-3;
         let total_iters = 500;
         let gap = 40u32;
@@ -608,9 +808,44 @@ mod tests {
         assert_eq!(
             validate_config(&config, 2),
             Err(
-                "bilateral-grid and PPISP are alternative appearance models; enable only one"
+                "bilateral-grid, PPISP, and PPISP-grid are alternative appearance models; enable only one"
                     .to_owned()
             )
         );
+    }
+
+    #[test]
+    fn accepts_hybrid_as_a_standalone_mode() {
+        let config = AppearanceConfig {
+            ppisp_grid: true,
+            ..AppearanceConfig::default()
+        };
+        assert_eq!(validate_config(&config, 2), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn hybrid_state_runs_one_training_step() {
+        let device = Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+        let config = AppearanceConfig {
+            ppisp_grid: true,
+            bilagrid_dims: (2, 2, 2),
+            grad_subsample: 1,
+            ..AppearanceConfig::default()
+        };
+        let mut state = AppearanceTrainState::new(config, vec![0, 0], 10, &device)
+            .expect("valid hybrid config")
+            .expect("hybrid state");
+        let active = state.begin_step(1);
+        let image = Tensor::full([4, 5, 3], 0.25, &device).require_grad();
+        let mut loss = active.apply(image).mean();
+        if let Some(regularization) = active.reg_loss() {
+            loss = loss + regularization;
+        }
+        let mut gradients = loss.backward();
+        state.end_step(active, &mut gradients);
+
+        let stats = state.stats().await.expect("hybrid stats");
+        assert!(stats.contains("grid exposure"));
+        assert!(stats.contains("vignetting"));
     }
 }

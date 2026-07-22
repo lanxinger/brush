@@ -222,19 +222,19 @@ fn merge_config_fields(
         }
     }
 
-    // These flags are mutually exclusive. An explicit CLI choice replaces a
-    // saved choice instead of making the merged config invalid.
-    if explicit_fields.iter().any(|field| field == "ppisp")
-        && cli.get("ppisp") == Some(&Value::Bool(true))
-    {
-        initial.insert("bilateral-grid".to_owned(), Value::Bool(false));
-    }
-    if explicit_fields
-        .iter()
-        .any(|field| field == "bilateral-grid")
-        && cli.get("bilateral-grid") == Some(&Value::Bool(true))
-    {
-        initial.insert("ppisp".to_owned(), Value::Bool(false));
+    // Appearance modes are mutually exclusive. An explicit CLI choice
+    // replaces a saved choice instead of making the merged config invalid.
+    const APPEARANCE_MODES: [&str; 3] = ["bilateral-grid", "ppisp", "ppisp-grid"];
+    for selected in APPEARANCE_MODES {
+        if explicit_fields.iter().any(|field| field == selected)
+            && cli.get(selected) == Some(&Value::Bool(true))
+        {
+            for other in APPEARANCE_MODES {
+                if other != selected {
+                    initial.insert(other.to_owned(), Value::Bool(false));
+                }
+            }
+        }
     }
 
     serde_json::from_value(Value::Object(initial)).ok()
@@ -397,6 +397,20 @@ mod tests {
         let merged = merge_explicit_cli_fields(&initial, &cli, &["ppisp".to_owned()]);
 
         assert!(merged.train_config.ppisp);
+        assert!(!merged.train_config.bilateral_grid);
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn test_explicit_hybrid_mode_replaces_saved_mode() {
+        let mut initial = TrainStreamConfig::default();
+        initial.train_config.ppisp = true;
+        let mut cli = TrainStreamConfig::default();
+        cli.train_config.ppisp_grid = true;
+
+        let merged = merge_explicit_cli_fields(&initial, &cli, &["ppisp-grid".to_owned()]);
+
+        assert!(merged.train_config.ppisp_grid);
+        assert!(!merged.train_config.ppisp);
         assert!(!merged.train_config.bilateral_grid);
     }
 }

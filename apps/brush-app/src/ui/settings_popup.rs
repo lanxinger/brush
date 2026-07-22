@@ -223,25 +223,49 @@ pub(crate) fn draw_settings(ui: &mut Ui, args: &mut TrainStreamConfig, enabled: 
 
     ui.collapsing("Appearance compensation", |ui| {
         let tc = &mut args.train_config;
-        let mut appearance_mode = match (tc.bilateral_grid, tc.ppisp) {
-            (true, false) => 1,
-            (false, true) => 2,
+        let mut appearance_mode = match (tc.ppisp_grid, tc.bilateral_grid, tc.ppisp) {
+            (true, false, false) => 1,
+            (false, true, false) => 2,
+            (false, false, true) => 3,
             _ => 0,
         };
         ui.add_enabled_ui(enabled, |ui| {
             ui.radio_value(&mut appearance_mode, 0, "None");
-            ui.radio_value(&mut appearance_mode, 1, "Per-view affine bilateral grid");
             ui.radio_value(
                 &mut appearance_mode,
-                2,
+                1,
+                "Hybrid PPISP grid (spatial exposure / color / tone curve)",
+            );
+            ui.radio_value(&mut appearance_mode, 2, "Per-view affine bilateral grid");
+            ui.radio_value(
+                &mut appearance_mode,
+                3,
                 "PPISP (exposure / color / vignetting / tone curve)",
             );
         });
         if enabled {
-            tc.bilateral_grid = appearance_mode == 1;
-            tc.ppisp = appearance_mode == 2;
+            tc.ppisp_grid = appearance_mode == 1;
+            tc.bilateral_grid = appearance_mode == 2;
+            tc.ppisp = appearance_mode == 3;
         }
-        if tc.bilateral_grid {
+        if tc.ppisp_grid {
+            ui.add_enabled(
+                enabled,
+                egui::Checkbox::new(&mut tc.ppisp_grid_expose_only, "Exposure-only grid payload"),
+            );
+            ui.add_enabled(
+                enabled,
+                egui::Checkbox::new(&mut tc.ppisp_grid_crf, "Per-cell tone curve"),
+            );
+            ui.add_enabled(
+                enabled,
+                egui::Checkbox::new(
+                    &mut tc.ppisp_crf_per_camera,
+                    "Additional per-camera tone curve",
+                ),
+            );
+        }
+        if tc.bilateral_grid || tc.ppisp_grid {
             slider(
                 ui,
                 &mut tc.bilagrid_tv_weight,
@@ -258,8 +282,26 @@ pub(crate) fn draw_settings(ui: &mut Ui, args: &mut TrainStreamConfig, enabled: 
                 true,
                 enabled,
             );
+            if tc.ppisp_grid {
+                slider(
+                    ui,
+                    &mut tc.bilagrid_mean_reg,
+                    0.0..=50.0,
+                    "Mean-to-identity weight",
+                    false,
+                    enabled,
+                );
+                slider(
+                    ui,
+                    &mut tc.bilagrid_grad_subsample,
+                    1..=8,
+                    "Gradient subsampling",
+                    false,
+                    enabled,
+                );
+            }
         }
-        if tc.ppisp {
+        if tc.ppisp || tc.ppisp_grid {
             slider(
                 ui,
                 &mut tc.ppisp_lr,

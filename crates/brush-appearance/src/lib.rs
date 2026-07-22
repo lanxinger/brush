@@ -1,6 +1,6 @@
 //! Per-view appearance compensation for Brush training.
 //!
-//! Two independently toggleable models, both applied to the *rendered* image
+//! Three mutually exclusive models, all applied to the *rendered* image
 //! before the photometric loss so the splats themselves learn canonical
 //! (appearance-free) colors:
 //!
@@ -15,6 +15,10 @@
 //!   with a handful of parameters each, applied per pixel by a fused kernel.
 //!   The parameter regularisation is plain tensor ops (the params are tiny).
 //!
+//! - [`ppisp_grid`]: a spatial hybrid with per-camera vignetting followed by
+//!   a per-view bilateral grid whose cells carry PPISP exposure, color, and
+//!   optional CRF parameters.
+//!
 //! Both follow the `brush-loss` pattern: a backend trait implemented for the
 //! raw `CubeCL` backend and the Fusion backend, plus custom Burn autodiff ops
 //! so gradients flow to both the appearance params and the rendered image.
@@ -22,6 +26,8 @@
 pub mod bilagrid;
 mod bilagrid_kernels;
 pub mod ppisp;
+pub mod ppisp_grid;
+mod ppisp_grid_kernels;
 mod ppisp_kernels;
 mod ppisp_math;
 pub mod train_state;
@@ -111,13 +117,48 @@ pub(crate) fn contiguous<R: CubeRuntime>(t: CubeTensor<R>) -> CubeTensor<R> {
     burn_cubecl::kernel::into_contiguous(t)
 }
 
+/// Optional stochastic subsampling of grid-gradient scatters. Each elected
+/// subgroup scales its contribution by `every`, leaving the image gradient
+/// exact and the grid-gradient estimate unbiased.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GradSubsample {
+    pub every: u32,
+    pub seed: u32,
+}
+
+impl GradSubsample {
+    pub fn for_step(every: u32, step: u32) -> Self {
+        let mut seed = step.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+        seed = ((seed >> ((seed >> 28) + 4)) ^ seed).wrapping_mul(277_803_737);
+        Self {
+            every: every.max(1),
+            seed: (seed >> 22) ^ seed,
+        }
+    }
+}
+
+impl Default for GradSubsample {
+    fn default() -> Self {
+        Self { every: 1, seed: 0 }
+    }
+}
+
 pub use bilagrid::{BilagridModel, bilagrid_apply, bilagrid_tv_loss};
 pub use ppisp::{PpispModel, PpispStages, ppisp_apply};
+pub use ppisp_grid::{GridPayload, ppisp_grid_apply};
 pub use train_state::{ActiveAppearance, AppearanceTrainState};
 
 /// Static configuration for the appearance models.
 #[derive(Debug, Clone)]
 pub struct AppearanceConfig {
+    /// Hybrid per-view PPISP payload grid with per-camera vignetting.
+    pub ppisp_grid: bool,
+    /// Include the eight color-homography latent channels in each grid cell.
+    pub grid_color: bool,
+    /// Include twelve CRF-offset channels in each grid cell.
+    pub grid_crf: bool,
+    /// Apply an additional learned per-camera CRF after the hybrid grid.
+    pub crf_per_camera: bool,
     /// Per-view affine bilateral grids.
     pub bilagrid: bool,
     /// Full per-frame PPISP.
@@ -127,10 +168,14 @@ pub struct AppearanceConfig {
     pub bilagrid_dims: (usize, usize, usize),
     /// Weight of the grid total-variation regulariser.
     pub bilagrid_tv_weight: f32,
+    /// Weight of the hybrid grid's dataset-mean-to-identity anchor.
+    pub bilagrid_mean_reg: f32,
     /// Grid learning rate (warmup + exponential decay applied).
     pub bilagrid_lr: f64,
     /// Adam betas for the sparse per-view grid updates.
     pub bilagrid_betas: (f64, f64),
+    /// Update one in every N subgroups for hybrid grid gradients; 1 disables.
+    pub grad_subsample: u32,
     /// PPISP learning rate (warmup + exponential decay applied).
     pub ppisp_lr: f64,
     /// Scale on all PPISP regularisation terms.
@@ -140,12 +185,18 @@ pub struct AppearanceConfig {
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
+            ppisp_grid: false,
+            grid_color: true,
+            grid_crf: true,
+            crf_per_camera: false,
             bilagrid: false,
             ppisp: false,
             bilagrid_dims: (16, 16, 8),
             bilagrid_tv_weight: 10.0,
+            bilagrid_mean_reg: 10.0,
             bilagrid_lr: 2e-3,
             bilagrid_betas: (0.9, 0.999),
+            grad_subsample: 4,
             ppisp_lr: 2e-3,
             ppisp_reg_scale: 1.0,
         }

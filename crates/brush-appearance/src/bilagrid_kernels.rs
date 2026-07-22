@@ -12,30 +12,30 @@ use burn_cubecl::cubecl::prelude::*;
 use crate::AtomicAddF32;
 use brush_cube::is_finite_f32;
 
-const LUMA_R: f32 = 0.299;
-const LUMA_G: f32 = 0.587;
-const LUMA_B: f32 = 0.114;
+pub(crate) const LUMA_R: f32 = 0.299;
+pub(crate) const LUMA_G: f32 = 0.587;
+pub(crate) const LUMA_B: f32 = 0.114;
 
 pub const BLOCK_SIZE: u32 = 256;
 
 #[derive(CubeType, Copy, Clone)]
 #[expand(derive(Clone, Copy))]
-struct SamplePoint {
-    x0: u32,
-    x1: u32,
-    y0: u32,
-    y1: u32,
-    z0: u32,
-    z1: u32,
-    tx: f32,
-    ty: f32,
-    tz: f32,
-    guidance_active: bool,
+pub(crate) struct SamplePoint {
+    pub x0: u32,
+    pub x1: u32,
+    pub y0: u32,
+    pub y1: u32,
+    pub z0: u32,
+    pub z1: u32,
+    pub tx: f32,
+    pub ty: f32,
+    pub tz: f32,
+    pub guidance_active: bool,
 }
 
 #[cube]
 #[allow(clippy::too_many_arguments)]
-fn sample_point(
+pub(crate) fn sample_point(
     pixel_x: u32,
     pixel_y: u32,
     red: f32,
@@ -69,6 +69,18 @@ fn sample_point(
         tz: z - f32::floor(z),
         guidance_active: raw_z > 0.0f32 && raw_z < f32::cast_from(grid_l - 1),
     }
+}
+
+/// Independent per-plane Bernoulli election used by optional grid-gradient
+/// subsampling. The image gradient remains exact; elected planes scale their
+/// grid contribution to keep the estimator unbiased.
+#[cube]
+#[allow(clippy::manual_is_multiple_of)]
+pub(crate) fn plane_elected(plane_idx: u32, seed: u32, every: u32) -> bool {
+    let mut x = plane_idx + seed * 2_654_435_769u32;
+    x = x * 747_796_405u32 + 2_891_336_453u32;
+    x = ((x >> ((x >> 28) + 4)) ^ x) * 277_803_737u32;
+    ((x >> 22) ^ x) % every == 0
 }
 
 #[cube]

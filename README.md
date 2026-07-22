@@ -34,10 +34,11 @@ For captures with varying exposure, white balance, or lens vignetting between im
 
 - `--bilateral-grid` learns a per-view affine color grid using [gsplat's](https://github.com/nerfstudio-project/gsplat) Apache-2.0 bilateral-grid semantics.
 - `--ppisp` enables the full [NVIDIA PPISP](https://research.nvidia.com/labs/sil/projects/ppisp/) model: per-frame exposure and color plus per-camera vignetting and tone curves.
+- `--ppisp-grid` enables the [Spirulae-Splat](https://github.com/harry7557558/spirulae-splat)-style hybrid: per-camera vignetting followed by a per-view bilateral grid of exposure, color, and tone-curve parameters. Use `--ppisp-grid-expose-only`, `--ppisp-grid-crf=false`, or `--ppisp-crf-per-camera` to select payload variants.
 
-Choose one appearance model per training run. The two flags are mutually exclusive because stacking the models introduces redundant, poorly identified corrections.
+Choose one appearance model per training run. The three flags are mutually exclusive because stacking the models introduces redundant, poorly identified corrections.
 
-Tunables: `--bilagrid-dims x,y,guidance`, `--bilagrid-tv-weight`, `--bilagrid-lr`, `--bilagrid-betas b1,b2`, `--ppisp-lr`, `--ppisp-reg-scale`.
+Tunables: `--bilagrid-dims x,y,guidance`, `--bilagrid-tv-weight`, `--bilagrid-mean-reg`, `--bilagrid-lr`, `--bilagrid-betas b1,b2`, `--bilagrid-grad-subsample`, `--ppisp-lr`, `--ppisp-reg-scale`.
 
 By default evaluation compares the raw, uncorrected render against ground truth — on appearance-varying captures that mostly measures the offset between the splats and the average appearance. Pass `--train-on-eval` to keep eval views in the training set; eval then applies each view's learned correction, which is the more meaningful comparison for these models.
 

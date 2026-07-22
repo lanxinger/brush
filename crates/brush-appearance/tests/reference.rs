@@ -1,7 +1,9 @@
 //! Correctness tests for the appearance kernels.
 
+use brush_appearance::GradSubsample;
 use brush_appearance::bilagrid::{BilagridModel, bilagrid_apply, bilagrid_tv_loss};
 use brush_appearance::ppisp::{PpispModel, PpispStages, ppisp_apply};
+use brush_appearance::ppisp_grid::{GridPayload, ppisp_grid_apply};
 use burn::tensor::{Device, Tensor};
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -341,4 +343,206 @@ async fn ppisp_model_identity_and_regularization() {
         .await
         .expect("regularization readback");
     assert!(regularization.abs() < 1e-6);
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn ppisp_grid_zero_payload_is_identity() {
+    let device = ad_device().await;
+    let (height, width) = (7, 9);
+    let rgb_data = pattern(height * width * 3, 61, 0.05, 0.95);
+    let rgb = Tensor::<1>::from_floats(rgb_data.as_slice(), &device).reshape([height, width, 3]);
+
+    for payload in [
+        GridPayload {
+            color: false,
+            crf: false,
+            vignetting: false,
+        },
+        GridPayload {
+            color: true,
+            crf: false,
+            vignetting: true,
+        },
+        GridPayload {
+            color: true,
+            crf: true,
+            vignetting: true,
+        },
+    ] {
+        let grids = Tensor::zeros([2, payload.channels(), 3, 4, 5], &device);
+        let vignetting = Tensor::zeros([2, 3, 5], &device);
+        let output = ppisp_grid_apply(
+            grids,
+            vignetting,
+            rgb.clone(),
+            1,
+            1,
+            payload,
+            GradSubsample::default(),
+        );
+        assert_close(
+            &read(output).await,
+            &rgb_data,
+            3e-4,
+            &format!("PPISP grid identity {payload:?}"),
+        );
+    }
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn ppisp_grid_constant_exposure_matches_log2_gain() {
+    let device = ad_device().await;
+    let (height, width) = (5, 7);
+    let exposure = 0.75;
+    let rgb_data = pattern(height * width * 3, 67, 0.05, 0.8);
+    let rgb = Tensor::<1>::from_floats(rgb_data.as_slice(), &device).reshape([height, width, 3]);
+    let payload = GridPayload {
+        color: false,
+        crf: false,
+        vignetting: false,
+    };
+    let grids = Tensor::full([1, 1, 3, 3, 3], exposure, &device);
+    let output = ppisp_grid_apply(
+        grids,
+        Tensor::zeros([1, 3, 5], &device),
+        rgb,
+        0,
+        0,
+        payload,
+        GradSubsample::default(),
+    );
+    let expected: Vec<_> = rgb_data
+        .iter()
+        .map(|value| value * 2.0f32.powf(exposure))
+        .collect();
+    assert_close(&read(output).await, &expected, 3e-4, "PPISP grid exposure");
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn ppisp_grid_gradients_match_finite_differences() {
+    let device = ad_device().await;
+    let (height, width) = (5, 7);
+    let (grid_x, grid_y, guidance) = (3, 3, 3);
+    let payload = GridPayload {
+        color: true,
+        crf: true,
+        vignetting: true,
+    };
+    let channels = payload.channels();
+    let cells = grid_x * grid_y * guidance;
+    let grid_data = pattern(channels * cells, 71, -0.15, 0.15);
+    let rgb_data = pattern(height * width * 3, 73, 0.1, 0.9);
+    let weights_data = pattern(height * width * 3, 79, -1.0, 1.0);
+    let mut vignetting_data = vec![0.0f32; 30];
+    for camera_channel in 0..6 {
+        let base = camera_channel * 5;
+        vignetting_data[base] = 0.02;
+        vignetting_data[base + 1] = -0.03;
+        vignetting_data[base + 2] = -0.25;
+        vignetting_data[base + 3] = -0.08;
+        vignetting_data[base + 4] = -0.02;
+    }
+    let camera_idx = 1;
+    let weights =
+        Tensor::<1>::from_floats(weights_data.as_slice(), &device).reshape([height, width, 3]);
+    let make_grid = |values: &[f32]| {
+        Tensor::<1>::from_floats(values, &device).reshape([1, channels, guidance, grid_y, grid_x])
+    };
+    let make_vignetting =
+        |values: &[f32]| Tensor::<1>::from_floats(values, &device).reshape([2, 3, 5]);
+    let make_rgb =
+        |values: &[f32]| Tensor::<1>::from_floats(values, &device).reshape([height, width, 3]);
+
+    let grid = make_grid(&grid_data).require_grad();
+    let vignetting = make_vignetting(&vignetting_data).require_grad();
+    let rgb = make_rgb(&rgb_data).require_grad();
+    let loss = (ppisp_grid_apply(
+        grid.clone(),
+        vignetting.clone(),
+        rgb.clone(),
+        0,
+        camera_idx,
+        payload,
+        GradSubsample::default(),
+    ) * weights.clone())
+    .sum();
+    let gradients = loss.backward();
+    let grid_grad = read(grid.grad(&gradients).expect("grid gradient")).await;
+    let vignetting_grad = read(vignetting.grad(&gradients).expect("vignetting gradient")).await;
+    let rgb_grad = read(rgb.grad(&gradients).expect("RGB gradient")).await;
+    assert!(
+        vignetting_grad[..15].iter().all(|value| *value == 0.0),
+        "inactive camera received a vignetting gradient"
+    );
+
+    let loss_for = |grid_values: &[f32], vig_values: &[f32], rgb_values: &[f32]| {
+        (ppisp_grid_apply(
+            make_grid(grid_values),
+            make_vignetting(vig_values),
+            make_rgb(rgb_values),
+            0,
+            camera_idx,
+            payload,
+            GradSubsample::default(),
+        ) * weights.clone())
+        .sum()
+    };
+    let epsilon = 1e-3;
+    for index in [0, 3 * cells + 2, 12 * cells + 4] {
+        let mut plus = grid_data.clone();
+        let mut minus = grid_data.clone();
+        plus[index] += epsilon;
+        minus[index] -= epsilon;
+        let finite_difference = (loss_for(&plus, &vignetting_data, &rgb_data)
+            .into_scalar_async::<f32>()
+            .await
+            .expect("plus grid loss")
+            - loss_for(&minus, &vignetting_data, &rgb_data)
+                .into_scalar_async::<f32>()
+                .await
+                .expect("minus grid loss"))
+            / (2.0 * epsilon);
+        assert!(
+            (grid_grad[index] - finite_difference).abs() < 5e-2 * finite_difference.abs().max(1.0),
+            "grid gradient mismatch at {index}: analytic {}, finite difference {finite_difference}",
+            grid_grad[index]
+        );
+    }
+
+    let vignetting_index = camera_idx * 15 + 2;
+    let mut plus = vignetting_data.clone();
+    let mut minus = vignetting_data.clone();
+    plus[vignetting_index] += epsilon;
+    minus[vignetting_index] -= epsilon;
+    let finite_difference = (loss_for(&grid_data, &plus, &rgb_data)
+        .into_scalar_async::<f32>()
+        .await
+        .expect("plus vignetting loss")
+        - loss_for(&grid_data, &minus, &rgb_data)
+            .into_scalar_async::<f32>()
+            .await
+            .expect("minus vignetting loss"))
+        / (2.0 * epsilon);
+    assert!(
+        (vignetting_grad[vignetting_index] - finite_difference).abs()
+            < 5e-2 * finite_difference.abs().max(1.0)
+    );
+
+    let rgb_index = 17;
+    let mut plus = rgb_data.clone();
+    let mut minus = rgb_data.clone();
+    plus[rgb_index] += epsilon;
+    minus[rgb_index] -= epsilon;
+    let finite_difference = (loss_for(&grid_data, &vignetting_data, &plus)
+        .into_scalar_async::<f32>()
+        .await
+        .expect("plus RGB loss")
+        - loss_for(&grid_data, &vignetting_data, &minus)
+            .into_scalar_async::<f32>()
+            .await
+            .expect("minus RGB loss"))
+        / (2.0 * epsilon);
+    assert!(
+        (rgb_grad[rgb_index] - finite_difference).abs() < 5e-2 * finite_difference.abs().max(1.0)
+    );
 }

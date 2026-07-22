@@ -277,7 +277,8 @@ impl SplatTrainer {
         }
     }
 
-    /// Set up per-view appearance compensation (bilateral grid or PPISP,
+    /// Set up per-view appearance compensation (hybrid grid, bilateral grid,
+    /// or PPISP,
     /// gated on the train config). `camera_indices` maps each training view
     /// to a physical-camera group for PPISP's per-camera params; same length
     /// and order as the scene's view list.
@@ -293,7 +294,7 @@ impl SplatTrainer {
         }
         anyhow::ensure!(
             start_iter == 0,
-            "appearance parameters are not stored in PLY checkpoints; resume with --start-iter is unsupported when --bilateral-grid or --ppisp is enabled"
+            "appearance parameters are not stored in PLY checkpoints; resume with --start-iter is unsupported when --ppisp-grid, --bilateral-grid, or --ppisp is enabled"
         );
         let [grid_x, grid_y, guidance] = self.config.bilagrid_dims.as_slice() else {
             anyhow::bail!("bilagrid-dims must contain exactly `x,y,guidance`");
@@ -302,11 +303,17 @@ impl SplatTrainer {
             anyhow::bail!("bilagrid-betas must contain exactly `b1,b2`");
         };
         let config = AppearanceConfig {
+            ppisp_grid: self.config.ppisp_grid,
+            grid_color: !self.config.ppisp_grid_expose_only,
+            grid_crf: self.config.ppisp_grid_crf,
+            crf_per_camera: self.config.ppisp_crf_per_camera,
             bilagrid: self.config.bilateral_grid,
             bilagrid_dims: (*grid_x as usize, *grid_y as usize, *guidance as usize),
             bilagrid_tv_weight: self.config.bilagrid_tv_weight,
+            bilagrid_mean_reg: self.config.bilagrid_mean_reg,
             bilagrid_lr: self.config.bilagrid_lr,
             bilagrid_betas: (*beta1, *beta2),
+            grad_subsample: self.config.bilagrid_grad_subsample,
             ppisp: self.config.ppisp,
             ppisp_lr: self.config.ppisp_lr,
             ppisp_reg_scale: self.config.ppisp_reg_scale,
