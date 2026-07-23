@@ -266,6 +266,24 @@ pub(crate) fn draw_settings(ui: &mut Ui, args: &mut TrainStreamConfig, enabled: 
             );
         }
         if tc.bilateral_grid || tc.ppisp_grid {
+            if tc.bilagrid_dims.len() != 3 {
+                tc.bilagrid_dims = vec![16, 16, 8];
+            }
+            ui.label("Grid dimensions");
+            ui.horizontal(|ui| {
+                for (value, label) in tc
+                    .bilagrid_dims
+                    .iter_mut()
+                    .zip(["Width", "Height", "Guidance"])
+                {
+                    ui.add_enabled(
+                        enabled,
+                        egui::DragValue::new(value)
+                            .range(2..=u32::MAX)
+                            .prefix(format!("{label}: ")),
+                    );
+                }
+            });
             slider(
                 ui,
                 &mut tc.bilagrid_tv_weight,
@@ -282,6 +300,22 @@ pub(crate) fn draw_settings(ui: &mut Ui, args: &mut TrainStreamConfig, enabled: 
                 true,
                 enabled,
             );
+            if tc.bilagrid_betas.len() != 2 {
+                tc.bilagrid_betas = vec![0.9, 0.999];
+            }
+            ui.label("Grid Adam betas");
+            ui.horizontal(|ui| {
+                for (value, label) in tc.bilagrid_betas.iter_mut().zip(["Beta 1", "Beta 2"]) {
+                    ui.add_enabled(
+                        enabled,
+                        egui::DragValue::new(value)
+                            .range(0.0..=1.0 - f64::EPSILON)
+                            .speed(0.001)
+                            .max_decimals(6)
+                            .prefix(format!("{label}: ")),
+                    );
+                }
+            });
             if tc.ppisp_grid {
                 slider(
                     ui,
@@ -294,7 +328,7 @@ pub(crate) fn draw_settings(ui: &mut Ui, args: &mut TrainStreamConfig, enabled: 
                 slider(
                     ui,
                     &mut tc.bilagrid_grad_subsample,
-                    1..=8,
+                    1..=64,
                     "Gradient subsampling",
                     false,
                     enabled,
