@@ -1,7 +1,10 @@
 use anyhow::Result;
 use brush_async::Actor;
 use brush_process::{RunningProcess, message::ProcessMessage, slot::Slot};
-use brush_render::{camera::Camera, gaussian_splats::Splats, kernels::camera_model::CameraModel};
+use brush_render::{
+    bounding_box::BoundingBox, camera::Camera, gaussian_splats::Splats,
+    kernels::camera_model::CameraModel,
+};
 use burn_wgpu::WgpuDevice;
 use egui::{Response, TextureHandle};
 use glam::{Affine3A, Quat, Vec3};
@@ -10,6 +13,9 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
 use crate::ui::{UiMode, app::CameraSettings, camera_controls::CameraController};
+
+const FRAME_MARGIN: f32 = 1.1;
+const RENDER_NEAR_PLANE: f32 = 0.01;
 
 #[derive(Debug, Clone)]
 enum ControlMessage {
@@ -135,14 +141,19 @@ impl UiProcess {
 
     #[allow(dead_code)] // Used from wasm.rs / android.rs.
     pub fn set_cam_transform(&self, position: Vec3, rotation: Quat) {
-        self.write().set_camera_transform(position, rotation);
+        let mut inner = self.write();
+        inner.camera_override = true;
+        inner.set_camera_transform(position, rotation);
+        drop(inner);
         self.read().repaint();
     }
 
     #[allow(dead_code)] // Used from wasm.rs / android.rs.
     pub fn set_focal_point(&self, focal_point: Vec3, focus_distance: f32, rotation: Quat) {
-        self.write()
-            .set_focal_point(focal_point, focus_distance, rotation);
+        let mut inner = self.write();
+        inner.camera_override = true;
+        inner.set_focal_point(focal_point, focus_distance, rotation);
+        drop(inner);
         self.read().repaint();
     }
 
@@ -173,6 +184,48 @@ impl UiProcess {
         let (_, rot, translate) = view_local_to_world.to_scale_rotation_translation();
         inner.controls.position = translate;
         inner.controls.rotation = rot;
+        if let Some(target) = inner.navigation_target {
+            inner.controls.focus_distance =
+                projected_focus_distance(target, translate, rot, RENDER_NEAR_PLANE);
+        }
+        inner.repaint();
+    }
+
+    pub fn can_auto_frame(&self) -> bool {
+        let inner = self.read();
+        !inner.camera_override && !inner.did_auto_frame
+    }
+
+    /// Frames robust model-space bounds once, preserving the current viewing
+    /// direction while replacing the arbitrary COLMAP pivot and distance.
+    pub fn frame_scene(&self, bounds: BoundingBox, viewport_aspect: f32) {
+        let mut inner = self.write();
+        if inner.camera_override || inner.did_auto_frame {
+            return;
+        }
+
+        let Some((target, distance)) = fit_bounds(
+            bounds,
+            inner.controls.model_local_to_world,
+            inner.controls.rotation,
+            inner.camera.fov_x,
+            inner.camera.fov_y,
+            viewport_aspect,
+            FRAME_MARGIN,
+        ) else {
+            return;
+        };
+
+        // Dataset intrinsics are restored by `focus_view` when a reference
+        // image is explicitly selected. Free navigation uses a centered
+        // pinhole camera so the orbit target is also the visual center.
+        inner.camera.center_uv = glam::vec2(0.5, 0.5);
+        inner.camera.camera_model = CameraModel::Pinhole;
+
+        let rotation = inner.controls.rotation;
+        inner.controls.stop_movement();
+        inner.set_focal_point(target, distance, rotation);
+        inner.did_auto_frame = true;
         inner.repaint();
     }
 
@@ -351,6 +404,12 @@ struct UiProcessInner {
     burn_device: WgpuDevice,
     actor: Actor,
     up_axis: Option<Vec3>,
+    /// An explicit embedding-host camera wins over automatic scene framing.
+    camera_override: bool,
+    /// Prevent later bounds-bearing updates from snapping an interactive camera.
+    did_auto_frame: bool,
+    /// Last explicit or automatic orbit target, retained across reference views.
+    navigation_target: Option<Vec3>,
 }
 
 impl UiProcessInner {
@@ -385,6 +444,9 @@ impl UiProcessInner {
             ui_ctx,
             actor,
             up_axis: None,
+            camera_override: false,
+            did_auto_frame: false,
+            navigation_target: None,
         }
     }
 
@@ -405,5 +467,184 @@ impl UiProcessInner {
         let position = focal_point - rotation * Vec3::Z * focus_distance;
         self.set_camera_transform(position, rotation);
         self.controls.focus_distance = focus_distance;
+        self.navigation_target = Some(focal_point);
+    }
+}
+
+fn projected_focus_distance(target: Vec3, position: Vec3, rotation: Quat, minimum: f32) -> f32 {
+    let projection = (target - position).dot(rotation * Vec3::Z);
+    if projection.is_finite() {
+        projection.max(minimum)
+    } else {
+        minimum
+    }
+}
+
+fn fit_bounds(
+    bounds: BoundingBox,
+    model_local_to_world: Affine3A,
+    camera_rotation: Quat,
+    fov_x: f64,
+    fov_y: f64,
+    viewport_aspect: f32,
+    margin: f32,
+) -> Option<(Vec3, f32)> {
+    if !bounds.center.is_finite()
+        || !bounds.extent.is_finite()
+        || !camera_rotation.is_finite()
+        || !viewport_aspect.is_finite()
+        || viewport_aspect <= 0.0
+        || !margin.is_finite()
+        || margin < 1.0
+    {
+        return None;
+    }
+
+    let mut tan_x = (fov_x * 0.5).tan() as f32;
+    let mut tan_y = (fov_y * 0.5).tan() as f32;
+    if !tan_x.is_finite() || !tan_y.is_finite() || tan_x <= 0.0 || tan_y <= 0.0 {
+        return None;
+    }
+
+    // Match ScenePanel's "show at least the dataset view" pinhole FOV expansion
+    // for the actual viewport aspect.
+    let camera_aspect = tan_x / tan_y;
+    if viewport_aspect > camera_aspect {
+        tan_x = tan_y * viewport_aspect;
+    } else {
+        tan_y = tan_x / viewport_aspect;
+    }
+
+    let target = model_local_to_world.transform_point3(bounds.center);
+    let camera_from_world = camera_rotation.inverse();
+    let extent = bounds.extent.abs();
+    let mut distance = 0.0_f32;
+
+    for x in [-1.0, 1.0] {
+        for y in [-1.0, 1.0] {
+            for z in [-1.0, 1.0] {
+                let local_corner = bounds.center + extent * Vec3::new(x, y, z);
+                let world_corner = model_local_to_world.transform_point3(local_corner);
+                let corner = camera_from_world * (world_corner - target);
+
+                distance = distance
+                    .max(corner.x.abs() * margin / tan_x - corner.z)
+                    .max(corner.y.abs() * margin / tan_y - corner.z)
+                    .max(RENDER_NEAR_PLANE - corner.z);
+            }
+        }
+    }
+
+    if !target.is_finite() || !distance.is_finite() {
+        return None;
+    }
+
+    Some((target, distance.max(RENDER_NEAR_PLANE)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_bounds_fit(
+        bounds: BoundingBox,
+        model_local_to_world: Affine3A,
+        rotation: Quat,
+        viewport_aspect: f32,
+    ) {
+        let fov_x = 0.8;
+        let fov_y = 0.8;
+        let (target, distance) = fit_bounds(
+            bounds,
+            model_local_to_world,
+            rotation,
+            fov_x,
+            fov_y,
+            viewport_aspect,
+            FRAME_MARGIN,
+        )
+        .expect("valid bounds should fit");
+
+        assert!(
+            target.abs_diff_eq(model_local_to_world.transform_point3(bounds.center), 1e-5),
+            "orbit target must be the transformed robust-bounds center"
+        );
+
+        let mut tan_x = (fov_x * 0.5).tan() as f32;
+        let mut tan_y = (fov_y * 0.5).tan() as f32;
+        let camera_aspect = tan_x / tan_y;
+        if viewport_aspect > camera_aspect {
+            tan_x = tan_y * viewport_aspect;
+        } else {
+            tan_y = tan_x / viewport_aspect;
+        }
+
+        let camera_from_world = rotation.inverse();
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    let local_corner = bounds.center + bounds.extent.abs() * Vec3::new(x, y, z);
+                    let world_corner = model_local_to_world.transform_point3(local_corner);
+                    let corner = camera_from_world * (world_corner - target);
+                    let depth = distance + corner.z;
+
+                    assert!(depth >= RENDER_NEAR_PLANE - 1e-5);
+                    assert!(corner.x.abs() / depth <= tan_x / FRAME_MARGIN + 1e-5);
+                    assert!(corner.y.abs() / depth <= tan_y / FRAME_MARGIN + 1e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fit_bounds_centers_and_contains_corners_across_scales_and_aspects() {
+        let rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.7, -0.35, 0.0).normalize();
+        let model_local_to_world = Affine3A::from_rotation_translation(
+            Quat::from_rotation_x(0.4),
+            Vec3::new(3.0, -2.0, 5.0),
+        );
+
+        for scale in [0.01, 1.0, 100.0] {
+            let bounds = BoundingBox {
+                center: Vec3::new(12.0, -7.0, 4.0) * scale,
+                extent: Vec3::new(2.0, 1.0, 3.0) * scale,
+            };
+            for aspect in [0.5, 1.0, 2.0] {
+                assert_bounds_fit(bounds, model_local_to_world, rotation, aspect);
+            }
+        }
+    }
+
+    #[test]
+    fn fit_bounds_rejects_invalid_input() {
+        let bounds = BoundingBox {
+            center: Vec3::ZERO,
+            extent: Vec3::ONE,
+        };
+
+        assert!(
+            fit_bounds(
+                bounds,
+                Affine3A::IDENTITY,
+                Quat::IDENTITY,
+                0.8,
+                0.8,
+                0.0,
+                FRAME_MARGIN,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reference_view_uses_closest_on_axis_scene_target() {
+        let target = Vec3::new(4.0, -3.0, 7.0);
+        let distance =
+            projected_focus_distance(target, Vec3::new(1.0, 2.0, 1.0), Quat::IDENTITY, 0.01);
+        assert!((distance - 6.0).abs() < 1e-6);
+
+        let behind =
+            projected_focus_distance(Vec3::NEG_Z, Vec3::ZERO, Quat::IDENTITY, RENDER_NEAR_PLANE);
+        assert_eq!(behind, RENDER_NEAR_PLANE);
     }
 }

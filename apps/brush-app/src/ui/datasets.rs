@@ -293,29 +293,15 @@ impl AppPane for DatasetPanel {
         process.ui_mode() == UiMode::Default && process.is_training()
     }
 
-    fn on_message(&mut self, message: &ProcessMessage, process: &UiProcess) {
+    fn on_message(&mut self, message: &ProcessMessage, _process: &UiProcess) {
         match message {
             ProcessMessage::NewProcess => {
                 *self = Self::default();
             }
             ProcessMessage::TrainMessage(TrainMessage::Dataset { dataset }) => {
-                if let Some(view) = dataset.train.views.first() {
-                    process.focus_view(&view.camera);
-                }
                 self.cur_dataset = dataset.clone();
                 self.loader = PreviewLoader::new();
                 self.displayed = None;
-            }
-            ProcessMessage::SplatsUpdated { up_axis, .. } => {
-                // Training does also handle this but in the dataset.
-                if process.is_training()
-                    && let Some(up_axis) = up_axis
-                {
-                    process.set_model_up(*up_axis);
-                    if let Some(view) = self.cur_dataset.train.views.first() {
-                        process.focus_view(&view.camera);
-                    }
-                }
             }
             _ => {}
         }

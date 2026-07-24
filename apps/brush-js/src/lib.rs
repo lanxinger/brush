@@ -88,6 +88,25 @@ impl BrushMessage {
         }
     }
 
+    /// Robust viewport bounds as `center.xyz | extent.xyz`.
+    #[wasm_bindgen(getter, js_name = viewportBounds)]
+    pub fn viewport_bounds(&self) -> Option<Vec<f32>> {
+        match &self.inner {
+            ProcessMessage::SplatsUpdated {
+                viewport_bounds: Some(bounds),
+                ..
+            } => Some(vec![
+                bounds.center.x,
+                bounds.center.y,
+                bounds.center.z,
+                bounds.extent.x,
+                bounds.extent.y,
+                bounds.extent.z,
+            ]),
+            _ => None,
+        }
+    }
+
     #[wasm_bindgen(getter, js_name = elapsedMs)]
     pub fn elapsed_ms(&self) -> Option<f64> {
         match &self.inner {

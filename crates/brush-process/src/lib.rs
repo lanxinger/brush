@@ -240,6 +240,12 @@ async fn run_process<
                 let message = message?;
 
                 let mode = message.meta.render_mode.unwrap_or(SplatRenderMode::Default);
+                let viewport_bounds = (frame == 0 && message.meta.progress >= 1.0).then(|| {
+                    brush_train::bounds_from_pos(
+                        brush_train::train::BOUND_PERCENTILE,
+                        &message.data.means,
+                    )
+                });
                 let splats = message.data.into_splats(&device, mode);
 
                 // As loading concatenates splats each time, memory usage tends to accumulate a lot
@@ -259,6 +265,7 @@ async fn run_process<
                 emitter
                     .emit(ProcessMessage::SplatsUpdated {
                         up_axis: message.meta.up_axis,
+                        viewport_bounds,
                         frame: frame as u32,
                         total_frames,
                         num_splats,
