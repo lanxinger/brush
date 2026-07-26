@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use crate::{
     adam_scaled::{AdamScaled, AdamScaledConfig, AdamState},
-    config::TrainConfig,
+    config::{SplitStrategy, TrainConfig},
     min_scale::compute_min_scale,
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
@@ -36,6 +36,11 @@ use tracing::{Instrument, trace_span};
 pub const BOUND_PERCENTILE: f32 = 0.8;
 
 const MIN_OPACITY: f32 = 1.0 / 255.0;
+
+const LAS_OFFSET_FACTOR: f32 = 0.5;
+const LAS_PRIMARY_SCALE_FACTOR: f32 = 0.5;
+const LAS_SECONDARY_SCALE_FACTOR: f32 = 0.85;
+const LAS_OPACITY_FACTOR: f32 = 0.6;
 
 /// Mip-Splatting 3D-filter strength. This is intentionally fixed: changing it
 /// alters the learned/exported representation rather than just training speed.
@@ -104,6 +109,7 @@ fn can_defer_sh_grad(_optimizer: &OptimizerType, _splats: &Splats) -> bool {
 pub struct SplatTrainer {
     config: TrainConfig,
     sched_mean: ExponentialLrScheduler,
+    scale_schedule_step: u32,
     refine_record: Option<RefineRecord>,
     optim: Option<OptimizerType>,
     /// Optional per-view appearance compensation (bilateral grid / PPISP).
@@ -126,8 +132,82 @@ fn inv_sigmoid(x: Tensor<1>) -> Tensor<1> {
     (x.clone() / (1.0f32 - x)).log()
 }
 
+/// `ImprovedGS+` Long-Axis Split equations (arXiv:2603.08661, Algorithm 1).
+///
+/// This is an independent tensor implementation of the published math. The
+/// caller supplies normalized `(w, x, y, z)` quaternions.
+fn long_axis_split_parameters(
+    cur_rots: Tensor<2>,
+    cur_log_scales: Tensor<2>,
+    cur_raw_opacities: Tensor<1>,
+    screen_sizes: Tensor<1>,
+    split_at_screen_size: f32,
+    post_split_opacity_decay: f32,
+) -> (Tensor<2>, Tensor<2>, Tensor<1>) {
+    let longest_axis = cur_log_scales
+        .clone()
+        .argmax(1)
+        .squeeze_dim::<1>(1)
+        .one_hot::<2>(3)
+        .float();
+
+    let base_scale_factors = longest_axis.clone()
+        * (LAS_PRIMARY_SCALE_FACTOR - LAS_SECONDARY_SCALE_FACTOR)
+        + LAS_SECONDARY_SCALE_FACTOR;
+    let cur_scales = cur_log_scales.clone().exp();
+    let scale_factors = if split_at_screen_size > 0.0 {
+        // Retain Brush's screen-size safety for severely oversized splats.
+        // The fixed ImprovedGS+ factors remain unchanged while they are the
+        // tighter constraint.
+        let cur_scales_sq = cur_scales.clone().powi_scalar(2);
+        let max_scale_sq = cur_scales_sq.clone().max_dim(1).clamp_min(1e-30);
+        let axis_ratio = cur_scales_sq / max_scale_sq;
+        let max_screen_factor = screen_sizes
+            .unsqueeze_dim(1)
+            .clamp_min(1e-6)
+            .recip()
+            .mul_scalar(split_at_screen_size)
+            .clamp_max(1.0);
+        let screen_scale_factors = -(axis_ratio * (-max_screen_factor + 1.0)) + 1.0;
+        base_scale_factors.min_pair(screen_scale_factors)
+    } else {
+        base_scale_factors
+    };
+    let offset_local = cur_scales * longest_axis * LAS_OFFSET_FACTOR;
+    let samples = quaternion_vec_multiply(cur_rots, offset_local);
+    let new_log_scales = cur_log_scales + scale_factors.log();
+
+    // `refine_splats` applies Brush's ordinary opacity decay to every splat
+    // after splitting. Compensate here so the post-refine LAS opacity is the
+    // paper's exact 0.6 × parent opacity.
+    let new_opacities = sigmoid(cur_raw_opacities) * LAS_OPACITY_FACTOR + post_split_opacity_decay;
+    let new_raw_opacities = inv_sigmoid(new_opacities.clamp(MIN_OPACITY, 1.0 - MIN_OPACITY));
+
+    (samples, new_log_scales, new_raw_opacities)
+}
+
 fn create_optimizer_from_config() -> OptimizerType {
     AdamScaledConfig::new().with_epsilon(1e-15).init()
+}
+
+fn exponential_lr_scheduler(
+    initial_lr: f64,
+    final_lr: f64,
+    total_steps: u32,
+) -> ExponentialLrScheduler {
+    let decay = (final_lr / initial_lr).powf(1.0 / total_steps as f64);
+    ExponentialLrSchedulerConfig::new(initial_lr, decay)
+        .init()
+        .expect("Learning rate schedule must be valid.")
+}
+
+fn exponential_lr_at_step(initial_lr: f64, final_lr: f64, step: u32, total_steps: u32) -> f64 {
+    if total_steps <= 1 {
+        return initial_lr;
+    }
+
+    let progress = step.min(total_steps - 1) as f64 / (total_steps - 1) as f64;
+    initial_lr * (final_lr / initial_lr).powf(progress)
 }
 
 #[cfg(all(
@@ -228,9 +308,22 @@ impl SplatTrainer {
         bounds: BoundingBox,
         seed: u64,
     ) -> Self {
-        let decay =
-            (config.lr_mean_end / config.lr_mean).powf(1.0 / config.total_train_iters as f64);
-        let lr_mean = ExponentialLrSchedulerConfig::new(config.lr_mean, decay);
+        Self::new_seeded_at_step(config, device, bounds, seed, 0)
+    }
+
+    /// Creates a trainer whose optional scale schedule resumes at `schedule_step`.
+    ///
+    /// The existing mean scheduler remains phase-local for backward compatibility.
+    #[allow(unused_variables)]
+    pub fn new_seeded_at_step(
+        config: &TrainConfig,
+        device: &Device,
+        bounds: BoundingBox,
+        seed: u64,
+        schedule_step: u32,
+    ) -> Self {
+        let sched_mean =
+            exponential_lr_scheduler(config.lr_mean, config.lr_mean_end, config.total_train_iters);
 
         let ssim_enabled = config.ssim_weight > 0.0;
 
@@ -245,7 +338,8 @@ impl SplatTrainer {
 
         Self {
             config,
-            sched_mean: lr_mean.init().expect("Mean lr schedule must be valid."),
+            sched_mean,
+            scale_schedule_step: schedule_step,
             optim: None,
             appearance: None,
             refine_record: None,
@@ -593,6 +687,19 @@ impl SplatTrainer {
             });
 
         let lr_mean = self.sched_mean.step() * median_scale as f64;
+        let lr_scale = self
+            .config
+            .lr_scale_end
+            .map_or(self.config.lr_scale, |lr_scale_end| {
+                let lr = exponential_lr_at_step(
+                    self.config.lr_scale,
+                    lr_scale_end,
+                    self.scale_schedule_step,
+                    self.config.total_train_iters,
+                );
+                self.scale_schedule_step = self.scale_schedule_step.saturating_add(1);
+                lr
+            });
 
         // Update per-component LR scaling for the transforms param.
         // transforms layout: means(3) + rotations(4) + log_scales(3)
@@ -608,9 +715,9 @@ impl SplatTrainer {
                 self.config.lr_rotation as f32,
                 self.config.lr_rotation as f32,
                 self.config.lr_rotation as f32,
-                self.config.lr_scale as f32,
-                self.config.lr_scale as f32,
-                self.config.lr_scale as f32,
+                lr_scale as f32,
+                lr_scale as f32,
+                lr_scale as f32,
             ];
             let transform_scaling =
                 Tensor::<1>::from_floats(lr_values.as_slice(), &opt_device).reshape([1, 10]);
@@ -699,7 +806,7 @@ impl SplatTrainer {
             num_visible,
             lr_mean,
             lr_rotation: self.config.lr_rotation,
-            lr_scale: self.config.lr_scale,
+            lr_scale,
             lr_coeffs: self.config.lr_coeffs_dc,
             lr_opac: self.config.lr_opac,
             loss: loss_inner,
@@ -968,6 +1075,9 @@ impl SplatTrainer {
         phase_total: u32,
     ) -> Splats {
         let refine_count = split_inds.len();
+        let train_t = (phase_iter as f32 / phase_total.max(1) as f32).clamp(0.0, 1.0);
+        let t_shrink_strength = 1.0 - train_t;
+        let minus_opac = self.config.opac_decay * t_shrink_strength;
 
         // From this point on we mutate canonical parameters and may change
         // cardinality. The old floor is camera-derived auxiliary state; drop
@@ -992,46 +1102,57 @@ impl SplatTrainer {
             let cur_sh_coeffs = splats.sh_coeffs.val().select(0, refine_inds.clone());
             let cur_raw_opac = splats.raw_opacities.val().select(0, refine_inds.clone());
 
-            let cur_scales = cur_log_scale.clone().exp();
+            let (samples, new_log_scales, new_raw_opac) = match self.config.split_strategy {
+                SplitStrategy::Default => {
+                    let cur_scales = cur_log_scale.clone().exp();
+                    let cur_opac = sigmoid(cur_raw_opac.clone());
+                    let inv_opac: Tensor<1> = 1.0 - cur_opac;
+                    // Post-split child opacity as a power law in transmittance,
+                    // p = 0.5 would keep the transmittance for cloning splats but as we offset them
+                    // choose a higher p.
+                    let new_opac: Tensor<1> = 1.0 - inv_opac.powf_scalar(FRAC_1_SQRT_2);
+                    let new_raw_opac = inv_sigmoid(new_opac.clamp(MIN_OPACITY, 1.0 - MIN_OPACITY));
 
-            let cur_opac = sigmoid(cur_raw_opac.clone());
-            let inv_opac: Tensor<1> = 1.0 - cur_opac;
-            // Post-split child opacity as a power law in transmittance,
-            // p = 0.5 would keep the transmittance for cloning splats but as we offset them
-            // choose a higher p.
-            let new_opac: Tensor<1> = 1.0 - inv_opac.powf_scalar(FRAC_1_SQRT_2);
-            let new_raw_opac = inv_sigmoid(new_opac.clamp(MIN_OPACITY, 1.0 - MIN_OPACITY));
-
-            // Smooth covariance-aware split. Per-axis shrink + mass-conserving
-            // deterministic offset (one child at +offset, the other at -offset).
-            // Children inherit the
-            // parent's rotation; the split is the scale shrink + ±offset.
-            let cur_scales_sq = cur_scales.clone().powi_scalar(2);
-            let max_scale_sq = cur_scales_sq.clone().max_dim(1).clamp_min(1e-30);
-            let ratio = cur_scales_sq / max_scale_sq;
-            // Max-axis shrink factor `k` (per splat). The standard split uses
-            // 1/√2 (mass-conserving). When `split_at_screen_size` is set, splats
-            // that are too big on screen shrink harder so their children land at
-            // (at most) the cap: `k = min(1/√2, split_at_screen_size / screen)`.
-            // Splats already within √2× of the cap are unaffected (min → 1/√2).
-            let k_per_axis: Tensor<2> = if self.config.split_at_screen_size > 0.0 {
-                let k_max = screen_sizes
-                    .select(0, refine_inds.clone())
-                    .unsqueeze_dim(1)
-                    .clamp_min(1e-6)
-                    .recip()
-                    .mul_scalar(self.config.split_at_screen_size)
-                    .clamp_max(FRAC_1_SQRT_2);
-                -(ratio * (-k_max + 1.0)) + 1.0
-            } else {
-                -(ratio * (1.0_f32 - FRAC_1_SQRT_2)) + 1.0
+                    // Smooth covariance-aware split. Per-axis shrink +
+                    // mass-conserving deterministic offset (one child at
+                    // +offset, the other at -offset).
+                    let cur_scales_sq = cur_scales.clone().powi_scalar(2);
+                    let max_scale_sq = cur_scales_sq.clone().max_dim(1).clamp_min(1e-30);
+                    let ratio = cur_scales_sq / max_scale_sq;
+                    // Max-axis shrink factor `k` (per splat). The standard
+                    // split uses 1/√2 (mass-conserving). When
+                    // `split_at_screen_size` is set, splats that are too big
+                    // on screen shrink harder so their children land at (at
+                    // most) the cap.
+                    let k_per_axis: Tensor<2> = if self.config.split_at_screen_size > 0.0 {
+                        let k_max = screen_sizes
+                            .select(0, refine_inds.clone())
+                            .unsqueeze_dim(1)
+                            .clamp_min(1e-6)
+                            .recip()
+                            .mul_scalar(self.config.split_at_screen_size)
+                            .clamp_max(FRAC_1_SQRT_2);
+                        -(ratio * (-k_max + 1.0)) + 1.0
+                    } else {
+                        -(ratio * (1.0_f32 - FRAC_1_SQRT_2)) + 1.0
+                    };
+                    let offset_factor = (-k_per_axis.clone().powi_scalar(2) + 1.0)
+                        .clamp_min(0.0)
+                        .sqrt();
+                    let offset_local = offset_factor * cur_scales;
+                    let samples = quaternion_vec_multiply(cur_rots.clone(), offset_local);
+                    let new_log_scales = cur_log_scale.clone() + k_per_axis.log();
+                    (samples, new_log_scales, new_raw_opac)
+                }
+                SplitStrategy::LongAxis => long_axis_split_parameters(
+                    cur_rots.clone(),
+                    cur_log_scale.clone(),
+                    cur_raw_opac.clone(),
+                    screen_sizes.select(0, refine_inds.clone()),
+                    self.config.split_at_screen_size,
+                    minus_opac,
+                ),
             };
-            let offset_factor = (-k_per_axis.clone().powi_scalar(2) + 1.0)
-                .clamp_min(0.0)
-                .sqrt();
-            let offset_local = offset_factor * cur_scales;
-            let samples = quaternion_vec_multiply(cur_rots.clone(), offset_local);
-            let new_log_scales = cur_log_scale.clone() + k_per_axis.log();
             let child_rots = cur_rots;
 
             // Scatter into transforms: build a [refine_count, 10] update tensor
@@ -1106,10 +1227,6 @@ impl SplatTrainer {
                 },
             );
         }
-
-        let train_t = (phase_iter as f32 / phase_total.max(1) as f32).clamp(0.0, 1.0);
-        let t_shrink_strength = 1.0 - train_t;
-        let minus_opac = self.config.opac_decay * t_shrink_strength;
 
         // Lower opacity slowly over time.
         splats.raw_opacities = splats.raw_opacities.map(|f| {
@@ -1250,5 +1367,143 @@ mod seeded_rng_tests {
             sample_background_color(base, 0.25, &mut first),
             sample_background_color(base, 0.25, &mut second)
         );
+    }
+}
+
+#[cfg(test)]
+mod improved_gs_plus_tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg(target_family = "wasm")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn exponential_scale_schedule_reaches_and_holds_endpoint() {
+        assert!((exponential_lr_at_step(0.02, 0.002, 0, 11) - 0.02).abs() < 1e-12);
+        assert!(
+            (exponential_lr_at_step(0.02, 0.002, 5, 11) - (0.02_f64 * 0.002).sqrt()).abs() < 1e-12
+        );
+        assert!((exponential_lr_at_step(0.02, 0.002, 10, 11) - 0.002).abs() < 1e-12);
+        assert!((exponential_lr_at_step(0.02, 0.002, 20, 11) - 0.002).abs() < 1e-12);
+        assert!((exponential_lr_at_step(0.02, 0.002, 0, 1) - 0.02).abs() < 1e-12);
+    }
+
+    #[wasm_bindgen_test(unsupported = tokio::test)]
+    async fn long_axis_split_matches_published_geometry() {
+        let device: burn::tensor::Device = brush_cube::test_helpers::test_device().await.into();
+        let scales = [
+            4.0_f32, 2.0, 1.0, // longest x
+            1.0, 4.0, 2.0, // longest y, rotated 90 degrees around z
+            1.0, 2.0, 4.0, // longest z
+            2.0, 2.0, 1.0, // tied longest axes choose x
+        ];
+        let log_scales = scales.map(f32::ln);
+        let half_sqrt = FRAC_1_SQRT_2;
+        let rotations = [
+            1.0_f32, 0.0, 0.0, 0.0, // identity
+            half_sqrt, 0.0, 0.0, half_sqrt, // +90 degrees around z
+            1.0, 0.0, 0.0, 0.0, // identity
+            1.0, 0.0, 0.0, 0.0, // identity
+        ];
+        let parent_opacity = 0.5_f32;
+        let raw_opacity = (parent_opacity / (1.0 - parent_opacity)).ln();
+        let opacity_decay = 0.004;
+
+        let (samples, new_log_scales, new_raw_opacities) = long_axis_split_parameters(
+            Tensor::<1>::from_floats(rotations, &device).reshape([4, 4]),
+            Tensor::<1>::from_floats(log_scales, &device).reshape([4, 3]),
+            Tensor::<1>::from_floats([raw_opacity; 4], &device),
+            Tensor::<1>::zeros([4], &device),
+            0.0,
+            opacity_decay,
+        );
+
+        let samples = samples
+            .into_data_async()
+            .await
+            .expect("read LAS offsets")
+            .into_vec::<f32>()
+            .expect("LAS offsets should be f32");
+        let new_scales = new_log_scales
+            .exp()
+            .into_data_async()
+            .await
+            .expect("read LAS scales")
+            .into_vec::<f32>()
+            .expect("LAS scales should be f32");
+        let final_opacities = (sigmoid(new_raw_opacities) - opacity_decay)
+            .into_data_async()
+            .await
+            .expect("read LAS opacities")
+            .into_vec::<f32>()
+            .expect("LAS opacities should be f32");
+
+        let expected_samples = [
+            2.0_f32, 0.0, 0.0, // local x
+            -2.0, 0.0, 0.0, // rotated local y
+            0.0, 0.0, 2.0, // local z
+            1.0, 0.0, 0.0, // deterministic x tie-break
+        ];
+        let expected_scales = [
+            2.0_f32, 1.7, 0.85, // x
+            0.85, 2.0, 1.7, // y
+            0.85, 1.7, 2.0, // z
+            1.0, 1.7, 0.85, // tied x/y, x selected
+        ];
+
+        for (actual, expected) in samples.into_iter().zip(expected_samples) {
+            assert_close(actual, expected);
+        }
+        for (actual, expected) in new_scales.into_iter().zip(expected_scales) {
+            assert_close(actual, expected);
+        }
+        for opacity in final_opacities {
+            assert_close(opacity, parent_opacity * LAS_OPACITY_FACTOR);
+        }
+    }
+
+    #[wasm_bindgen_test(unsupported = tokio::test)]
+    async fn long_axis_split_retains_screen_size_cap() {
+        let device: burn::tensor::Device = brush_cube::test_helpers::test_device().await.into();
+        let scales = [4.0_f32, 2.0, 1.0];
+        let log_scales = scales.map(f32::ln);
+
+        let (samples, new_log_scales, _) = long_axis_split_parameters(
+            Tensor::<1>::from_floats([1.0, 0.0, 0.0, 0.0], &device).reshape([1, 4]),
+            Tensor::<1>::from_floats(log_scales, &device).reshape([1, 3]),
+            Tensor::<1>::zeros([1], &device),
+            Tensor::<1>::from_floats([2.0], &device),
+            0.5,
+            0.0,
+        );
+
+        let samples = samples
+            .into_data_async()
+            .await
+            .expect("read capped LAS offset")
+            .into_vec::<f32>()
+            .expect("capped LAS offset should be f32");
+        let new_scales = new_log_scales
+            .exp()
+            .into_data_async()
+            .await
+            .expect("read capped LAS scales")
+            .into_vec::<f32>()
+            .expect("capped LAS scales should be f32");
+
+        for (actual, expected) in samples.into_iter().zip([2.0, 0.0, 0.0]) {
+            assert_close(actual, expected);
+        }
+        for (actual, expected) in new_scales.into_iter().zip([1.0, 1.625, 0.85]) {
+            assert_close(actual, expected);
+        }
     }
 }

@@ -1,6 +1,18 @@
 use brush_render::gaussian_splats::SplatRenderMode;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
+
+/// Geometry used when replacing one selected splat with two children.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum SplitStrategy {
+    /// Brush's covariance-aware split with adaptive screen-size shrinking.
+    #[default]
+    Default,
+    /// `ImprovedGS+` split along the rotated longest local axis.
+    LongAxis,
+}
 
 #[derive(Clone, Parser, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -55,9 +67,28 @@ pub struct TrainConfig {
     #[arg(long, help_heading = "Training options", default_value = "5e-3")]
     pub lr_scale: f64,
 
+    /// Optional final scale learning rate. When omitted, scale learning remains constant.
+    #[arg(
+        long,
+        help_heading = "Training options",
+        value_parser = parse_learning_rate
+    )]
+    #[serde(default)]
+    pub lr_scale_end: Option<f64>,
+
     /// Learning rate for the rotation parameters.
     #[arg(long, help_heading = "Training options", default_value = "2e-3")]
     pub lr_rotation: f64,
+
+    /// Geometry to use when splitting selected splats.
+    #[arg(
+        long,
+        help_heading = "Refine options",
+        value_enum,
+        default_value = "default"
+    )]
+    #[serde(default)]
+    pub split_strategy: SplitStrategy,
 
     /// Max nr. of splats. This is only an upper bound, the actual final number of splats is NOT determined by this.
     #[arg(long, help_heading = "Refine options", default_value = "10000000")]
@@ -311,6 +342,16 @@ impl TrainConfig {
         if self.lr_mean_end > self.lr_mean {
             return Err("lr-mean-end must not exceed lr-mean".to_owned());
         }
+        if let Some(lr_scale_end) = self.lr_scale_end {
+            for (name, value) in [("lr-scale", self.lr_scale), ("lr-scale-end", lr_scale_end)] {
+                if !valid_learning_rate(value) {
+                    return Err(format!("{name} must be finite and in the range (0, 1]"));
+                }
+            }
+            if lr_scale_end > self.lr_scale {
+                return Err("lr-scale-end must not exceed lr-scale".to_owned());
+            }
+        }
         if self
             .lod_levels
             .checked_mul(self.lod_refine_steps)
@@ -440,6 +481,42 @@ mod tests {
     }
 
     #[test]
+    fn scale_schedule_and_split_strategy_are_opt_in() {
+        let defaults = TrainConfig::default();
+        assert_eq!(defaults.lr_scale_end, None);
+        assert_eq!(defaults.split_strategy, SplitStrategy::Default);
+
+        let config = TrainConfig::try_parse_from([
+            "brush",
+            "--lr-scale",
+            "0.02",
+            "--lr-scale-end",
+            "0.002",
+            "--split-strategy",
+            "long-axis",
+        ])
+        .expect("ImprovedGS+ pilot options should parse");
+        assert_eq!(config.lr_scale, 0.02);
+        assert_eq!(config.lr_scale_end, Some(0.002));
+        assert_eq!(config.split_strategy, SplitStrategy::LongAxis);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cli_rejects_invalid_scale_schedule_endpoint() {
+        for args in [
+            ["brush", "--lr-scale-end", "0"],
+            ["brush", "--lr-scale-end", "NaN"],
+            ["brush", "--lr-scale-end", "2"],
+        ] {
+            assert!(
+                TrainConfig::try_parse_from(args).is_err(),
+                "accepted invalid scale schedule option: {args:?}"
+            );
+        }
+    }
+
+    #[test]
     #[allow(clippy::field_reassign_with_default)]
     fn validation_rejects_invalid_programmatic_mean_schedule() {
         let mut config = TrainConfig::default();
@@ -449,6 +526,24 @@ mod tests {
         config.total_train_iters = 1;
         config.lr_mean_end = config.lr_mean * 2.0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn validation_rejects_invalid_programmatic_scale_schedule() {
+        let mut config = TrainConfig::default();
+        config.lr_scale_end = Some(config.lr_scale * 2.0);
+        assert_eq!(
+            config.validate(),
+            Err("lr-scale-end must not exceed lr-scale".to_owned())
+        );
+
+        config.lr_scale = 0.0;
+        config.lr_scale_end = Some(1e-3);
+        assert_eq!(
+            config.validate(),
+            Err("lr-scale must be finite and in the range (0, 1]".to_owned())
+        );
     }
 
     #[test]

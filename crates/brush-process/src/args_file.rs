@@ -312,12 +312,17 @@ mod tests {
     fn test_config_round_trip() {
         let mut original = TrainStreamConfig::default();
         original.train_config.total_train_iters = 5000;
+        original.train_config.lr_scale = 0.02;
+        original.train_config.lr_scale_end = Some(0.002);
+        original.train_config.split_strategy = brush_train::config::SplitStrategy::LongAxis;
         original.model_config.sh_degree = 2;
         original.load_config.max_frames = Some(10);
         original.process_config.seed = 123;
 
         // Convert to args
         let args = config_to_args(&original);
+        assert!(args.iter().any(|arg| arg == "--lr-scale-end=0.002"));
+        assert!(args.iter().any(|arg| arg == "--split-strategy=long-axis"));
 
         // Parse args back
         let mut cli_args = vec!["brush".to_owned()];
@@ -325,6 +330,12 @@ mod tests {
 
         let parsed = TrainStreamConfig::try_parse_from(&cli_args).expect("Should parse");
         assert_eq!(parsed.train_config.total_train_iters, 5000);
+        assert_eq!(parsed.train_config.lr_scale, 0.02);
+        assert_eq!(parsed.train_config.lr_scale_end, Some(0.002));
+        assert_eq!(
+            parsed.train_config.split_strategy,
+            brush_train::config::SplitStrategy::LongAxis
+        );
         assert_eq!(parsed.model_config.sh_degree, 2);
         assert_eq!(parsed.load_config.max_frames, Some(10));
         assert_eq!(parsed.process_config.seed, 123);

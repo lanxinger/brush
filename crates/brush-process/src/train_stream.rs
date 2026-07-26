@@ -153,11 +153,12 @@ pub(crate) async fn train_stream(
     let bounds = get_splat_bounds(init_splats.clone(), BOUND_PERCENTILE).await;
     // Use the exact capped/scaled image dimensions consumed by the loader.
     let view_cams = mip_view_cameras(&dataset.train).await;
-    let mut trainer = SplatTrainer::new_seeded(
+    let mut trainer = SplatTrainer::new_seeded_at_step(
         &train_stream_config.train_config,
         &device,
         bounds,
         process_config.seed,
+        process_config.start_iter,
     );
     trainer.set_view_cams(view_cams.clone());
 
@@ -344,11 +345,12 @@ pub(crate) async fn train_stream(
 
             let appearance = trainer.take_appearance();
             let bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
-            trainer = SplatTrainer::new_seeded(
+            trainer = SplatTrainer::new_seeded_at_step(
                 &train_stream_config.train_config,
                 &device,
                 bounds,
                 process_config.seed,
+                iter,
             );
             trainer.set_view_cams(lod_view_cams);
             trainer.set_appearance(appearance);
