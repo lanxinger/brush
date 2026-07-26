@@ -175,7 +175,6 @@ pub(crate) async fn train_stream(
     emitter
         .emit(ProcessMessage::SplatsUpdated {
             up_axis,
-            viewport_bounds: Some(bounds),
             frame: 0,
             total_frames: 1,
             num_splats: init_splats.num_splats(),
@@ -557,7 +556,6 @@ pub(crate) async fn train_stream(
             emitter
                 .emit(ProcessMessage::SplatsUpdated {
                     up_axis: None,
-                    viewport_bounds: None,
                     frame: 0,
                     total_frames: 1,
                     num_splats: refine.total_splats,

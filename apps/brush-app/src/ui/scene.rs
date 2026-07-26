@@ -1,6 +1,5 @@
 use brush_process::DataSource;
 use brush_process::{create_process, message::ProcessMessage};
-use brush_render::bounding_box::BoundingBox;
 use brush_render::camera::{focal_to_fov, fov_to_focal};
 use core::f32;
 use eframe::egui_wgpu::RenderState;
@@ -122,9 +121,6 @@ pub struct ScenePanel {
     dataset: Option<brush_dataset::Dataset>,
     #[serde(skip)]
     pose_match_alpha: f32,
-    /// Bounds waiting for the viewport size before the initial one-shot frame.
-    #[serde(skip)]
-    pending_frame_bounds: Option<BoundingBox>,
 }
 
 impl ScenePanel {
@@ -354,7 +350,6 @@ impl ScenePanel {
         self.seen_warning_count = 0;
         self.dataset = None;
         self.pose_match_alpha = 0.0;
-        self.pending_frame_bounds = None;
     }
 
     /// Fade in letterbox/pillarbox bars while the user is sitting on a dataset
@@ -849,7 +844,6 @@ impl AppPane for ScenePanel {
             }
             ProcessMessage::SplatsUpdated {
                 up_axis,
-                viewport_bounds,
                 frame,
                 total_frames,
                 ..
@@ -857,32 +851,14 @@ impl AppPane for ScenePanel {
                 self.has_splats = true;
                 self.frame_count = *total_frames;
 
-                if let Some(up_axis) = up_axis {
-                    process.set_model_up(*up_axis);
-                }
-
-                if let Some(bounds) = viewport_bounds {
-                    if process.can_auto_frame() {
-                        // Preserve the first dataset view's viewing direction,
-                        // but replace its arbitrary target and distance when
-                        // the actual viewport size is known below.
-                        if process.is_training()
-                            && let Some(view) = self
-                                .dataset
-                                .as_ref()
-                                .and_then(|dataset| dataset.train.views.first())
-                        {
-                            process.focus_view(&view.camera);
-                        }
-                        if self.pending_frame_bounds.is_none() {
-                            self.pending_frame_bounds = Some(*bounds);
-                        }
-                    }
-                }
-
                 // For non-training updates (e.g., loading), always redraw
                 if !process.is_training() {
                     self.splats_dirty = true;
+
+                    // When training, datasets handle this.
+                    if let Some(up_axis) = up_axis {
+                        process.set_model_up(*up_axis);
+                    }
 
                     // For single-frame or still loading, keep frame at current loaded frame
                     if *total_frames <= 1 || *frame < *total_frames - 1 {
@@ -1052,11 +1028,6 @@ impl AppPane for ScenePanel {
                 egui::Vec2::new(size.x as f32, size.y as f32),
                 egui::Sense::drag(),
             );
-
-            if let Some(bounds) = self.pending_frame_bounds.take() {
-                process.frame_scene(bounds, camera_size.x as f32 / camera_size.y as f32);
-            }
-
             if interactive {
                 process.tick_controls(&response, ui);
             }
