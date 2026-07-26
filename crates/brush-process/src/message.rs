@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use brush_render::bounding_box::BoundingBox;
 use brush_vfs::DataSource;
 use glam::Vec3;
 
@@ -53,11 +52,6 @@ pub enum ProcessMessage {
     /// Notification that splats have been updated.
     SplatsUpdated {
         up_axis: Option<Vec3>,
-        /// Robust bounds suitable for one-shot viewport framing.
-        ///
-        /// Present when a process has newly computed framing bounds. Consumers
-        /// should not continuously refit the camera on later splat updates.
-        viewport_bounds: Option<BoundingBox>,
         frame: u32,
         total_frames: u32,
         num_splats: u32,

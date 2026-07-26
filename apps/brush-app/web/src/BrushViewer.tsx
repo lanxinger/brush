@@ -78,12 +78,7 @@ export default function BrushViewer(props: BrushViewerProps) {
   }, [app, props.url, props.speedScale, props.minFocusDistance, props.maxFocusDistance]);
 
   useEffect(() => {
-    const hasCameraOverride =
-      props.focalPoint !== undefined ||
-      props.focusDistance !== undefined ||
-      props.cameraRotation !== undefined;
-
-    if (app && hasCameraOverride) {
+    if (app) {
       const focalPoint = props.focalPoint ?? new Vector3(0, 0, 0);
       const focalDistance = props.focusDistance ?? 2.5;
       const cameraRotation = props.cameraRotation ?? new Vector3(0, 0, 0);

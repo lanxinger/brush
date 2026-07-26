@@ -388,7 +388,6 @@ function scheduleRebind() {
 const PERF_WINDOW = 32;
 type StepSample = { iter: number; jsMs: number };
 const stepSamples: StepSample[] = [];
-let didAutoFrame = false;
 
 function resetPerf() {
   stepSamples.length = 0;
@@ -412,7 +411,6 @@ function applyMessage(msg: BrushMessage) {
     case BrushMessageKind.NewProcess:
       stats.status.text = 'starting';
       resetPerf();
-      didAutoFrame = false;
       break;
     case BrushMessageKind.StartLoading:
       stats.status.text = `loading ${msg.name ?? ''}`;
@@ -425,10 +423,6 @@ function applyMessage(msg: BrushMessage) {
       break;
     case BrushMessageKind.SplatsUpdated:
       if (msg.numSplats !== undefined) stats.splats.text = String(msg.numSplats);
-      if (!didAutoFrame && msg.viewportBounds !== undefined) {
-        frameBounds(msg.viewportBounds);
-        didAutoFrame = true;
-      }
       scheduleRebind();
       break;
     case BrushMessageKind.TrainStep:
@@ -516,33 +510,7 @@ const camera: Camera = {
   far: 100,
 };
 
-const orbit = {
-  yaw: Math.PI / 4,
-  pitch: -0.4,
-  radius: 4.5,
-  minRadius: 0.2,
-  maxRadius: 50,
-  sceneRadius: 0,
-};
-
-type Vec3 = [number, number, number];
-
-function dot3(a: Vec3, b: Vec3): number {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-function cross3(a: Vec3, b: Vec3): Vec3 {
-  return [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-}
-
-function normalize3(v: Vec3): Vec3 {
-  const length = Math.hypot(v[0], v[1], v[2]) || 1;
-  return [v[0] / length, v[1] / length, v[2] / length];
-}
+const orbit = { yaw: Math.PI / 4, pitch: -0.4, radius: 4.5 };
 
 function applyOrbit() {
   const cy = Math.cos(orbit.yaw), sy = Math.sin(orbit.yaw);
@@ -552,67 +520,6 @@ function applyOrbit() {
     camera.target[1] + orbit.radius * sp,
     camera.target[2] + orbit.radius * cp * cy,
   ];
-
-  if (orbit.sceneRadius > 0) {
-    const scale = Math.max(orbit.sceneRadius, orbit.radius);
-    camera.near = Math.max(
-      scale * 1e-5,
-      orbit.radius - orbit.sceneRadius * 2,
-    );
-    camera.far = Math.max(
-      camera.near * 10,
-      orbit.radius + orbit.sceneRadius * 4,
-    );
-  }
-}
-
-function frameBounds(bounds: Float32Array) {
-  if (bounds.length < 6) return;
-
-  const center: Vec3 = [bounds[0], bounds[1], bounds[2]];
-  const extent: Vec3 = [
-    Math.abs(bounds[3]),
-    Math.abs(bounds[4]),
-    Math.abs(bounds[5]),
-  ];
-  if (![...center, ...extent].every(Number.isFinite)) return;
-
-  const cy = Math.cos(orbit.yaw), sy = Math.sin(orbit.yaw);
-  const cp = Math.cos(orbit.pitch), sp = Math.sin(orbit.pitch);
-  const eyeDirection: Vec3 = [cp * sy, sp, cp * cy];
-  const forward: Vec3 = [-eyeDirection[0], -eyeDirection[1], -eyeDirection[2]];
-  const right = normalize3(cross3(forward, camera.up));
-  const up = cross3(right, forward);
-  const aspect = Math.max(1, viewerCanvas.clientWidth) /
-    Math.max(1, viewerCanvas.clientHeight);
-  const tanY = Math.tan(camera.fovYRad * 0.5);
-  const tanX = tanY * aspect;
-  const margin = 1.1;
-  const sceneRadius = Math.hypot(extent[0], extent[1], extent[2]);
-  const nearPadding = Math.max(sceneRadius * 0.01, 1e-6);
-  let distance = nearPadding;
-
-  for (const x of [-1, 1]) {
-    for (const y of [-1, 1]) {
-      for (const z of [-1, 1]) {
-        const corner: Vec3 = [extent[0] * x, extent[1] * y, extent[2] * z];
-        const forwardOffset = dot3(corner, forward);
-        distance = Math.max(
-          distance,
-          Math.abs(dot3(corner, right)) * margin / tanX - forwardOffset,
-          Math.abs(dot3(corner, up)) * margin / tanY - forwardOffset,
-          nearPadding - forwardOffset,
-        );
-      }
-    }
-  }
-
-  camera.target = center;
-  orbit.radius = distance;
-  orbit.sceneRadius = Math.max(sceneRadius, nearPadding);
-  orbit.minRadius = Math.max(orbit.sceneRadius * 0.05, 1e-6);
-  orbit.maxRadius = Math.max(distance * 100, orbit.sceneRadius * 100);
-  applyOrbit();
 }
 applyOrbit();
 
@@ -640,10 +547,7 @@ viewerCanvas.addEventListener('pointermove', (e) => {
 });
 viewerCanvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  orbit.radius = Math.max(
-    orbit.minRadius,
-    Math.min(orbit.maxRadius, orbit.radius * (1 + e.deltaY * 0.001)),
-  );
+  orbit.radius = Math.max(0.2, Math.min(50, orbit.radius * (1 + e.deltaY * 0.001)));
   applyOrbit();
 }, { passive: false });
 
