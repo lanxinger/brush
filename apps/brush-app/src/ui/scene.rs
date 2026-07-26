@@ -861,22 +861,22 @@ impl AppPane for ScenePanel {
                     process.set_model_up(*up_axis);
                 }
 
-                if let Some(bounds) = viewport_bounds {
-                    if process.can_auto_frame() {
-                        // Preserve the first dataset view's viewing direction,
-                        // but replace its arbitrary target and distance when
-                        // the actual viewport size is known below.
-                        if process.is_training()
-                            && let Some(view) = self
-                                .dataset
-                                .as_ref()
-                                .and_then(|dataset| dataset.train.views.first())
-                        {
-                            process.focus_view(&view.camera);
-                        }
-                        if self.pending_frame_bounds.is_none() {
-                            self.pending_frame_bounds = Some(*bounds);
-                        }
+                if let Some(bounds) = viewport_bounds
+                    && process.can_auto_frame()
+                {
+                    // Preserve the first dataset view's viewing direction,
+                    // but replace its arbitrary target and distance when
+                    // the actual viewport size is known below.
+                    if process.is_training()
+                        && let Some(view) = self
+                            .dataset
+                            .as_ref()
+                            .and_then(|dataset| dataset.train.views.first())
+                    {
+                        process.focus_view(&view.camera);
+                    }
+                    if self.pending_frame_bounds.is_none() {
+                        self.pending_frame_bounds = Some(*bounds);
                     }
                 }
 
