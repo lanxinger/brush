@@ -51,7 +51,11 @@ pub fn map_gaussians_to_intersect_kernel(
         0u32,
         splat_cum_hit_counts[prev_idx as usize],
     );
-    // Slot budget reserved for this splat in PF.
+    // Slot budget reserved for this splat in PF. PF ran the same
+    // `will_primitive_contribute` walk, so the emission loop below should
+    // count the same tiles — but the two dispatches go through separate
+    // shader optimisation passes, so cap emission at `pf_count` and pad any
+    // leftover budget (belt and suspenders).
     let pf_count = splat_cum_hit_counts[compact_gid as usize] - base_isect_id;
 
     // Tile id past the valid range — radix-sorts after every real tile

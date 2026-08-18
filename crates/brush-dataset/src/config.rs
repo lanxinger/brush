@@ -74,6 +74,18 @@ pub struct LoadDatasetConfig {
     /// Whether to interpret an alpha channel (or masks) as transparency or masking.
     #[arg(long, help_heading = "Dataset Options")]
     pub alpha_mode: Option<AlphaMode>,
+    /// Invert mask images, so white means "ignore this pixel" instead of "keep it".
+    #[arg(
+        long,
+        help_heading = "Dataset Options",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        default_value_t = false
+    )]
+    #[serde(default)]
+    pub invert_masks: bool,
     /// Max size of the cache for frames of the dataset, larger values usually improve performance for large datasets at the cost of more memory usage, can be e.g. 6G, 6000M, 6000MiB, 6000MB
     #[arg(long, help_heading = "Dataset Options", default_value = DEFAULT_MAX_SCENE_BATCH_CACHE_SIZE, value_parser = parse_size)]
     pub max_scene_batch_cache_size: u64,
@@ -181,6 +193,17 @@ mod tests {
         assert_eq!(cli.dataset.eval_split_every, Some(2));
         assert_eq!(cli.dataset.subsample_frames, Some(2));
         assert_eq!(cli.dataset.subsample_points, Some(3));
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn accepts_optional_boolean_mask_inversion() {
+        let enabled = TestCli::try_parse_from(["test", "--invert-masks"])
+            .expect("bare invert-masks should enable inversion");
+        assert!(enabled.dataset.invert_masks);
+
+        let disabled = TestCli::try_parse_from(["test", "--invert-masks=false"])
+            .expect("explicit false should disable inversion");
+        assert!(!disabled.dataset.invert_masks);
     }
 
     #[wasm_bindgen_test(unsupported = test)]

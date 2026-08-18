@@ -221,13 +221,13 @@ mod tests {
             .into_data_async()
             .await
             .expect("readback")
-            .to_vec()
+            .try_to_vec()
             .expect("f32 output");
         let expected: Vec<f32> = means
             .into_data_async()
             .await
             .expect("means readback")
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("f32 means")
             .chunks_exact(3)
             .map(|xyz| {
@@ -258,7 +258,7 @@ mod tests {
                 .into_data_async()
                 .await
                 .expect("readback")
-                .to_vec()
+                .try_to_vec()
                 .expect("f32 output");
 
         assert_eq!(floor.len(), 1);
@@ -286,14 +286,14 @@ mod tests {
             .into_data_async()
             .await
             .expect("first scale readback")
-            .to_vec()
+            .try_to_vec()
             .expect("f32 scales");
         let first_opacities: Vec<f32> = splats
             .opacities()
             .into_data_async()
             .await
             .expect("first opacity readback")
-            .to_vec()
+            .try_to_vec()
             .expect("f32 opacities");
 
         let floor = compute_min_scale(&splats.means(), &cameras, 0.1).expect("refreshed floor");
@@ -303,14 +303,14 @@ mod tests {
             .into_data_async()
             .await
             .expect("refreshed scale readback")
-            .to_vec()
+            .try_to_vec()
             .expect("f32 scales");
         let refreshed_opacities: Vec<f32> = refreshed
             .opacities()
             .into_data_async()
             .await
             .expect("refreshed opacity readback")
-            .to_vec()
+            .try_to_vec()
             .expect("f32 opacities");
 
         assert_eq!(first_scales, refreshed_scales);

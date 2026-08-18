@@ -14,7 +14,7 @@ pub async fn validate_tensor_val<const D: usize>(
         .await
         .expect("Failed to read tensor data");
     let values = data
-        .into_vec::<f32>()
+        .try_into_vec::<f32>()
         .expect("Failed to convert tensor to f32 vec");
 
     let mut nan_count = 0;

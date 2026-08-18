@@ -325,7 +325,7 @@ fn ppisp_grid_backward<B: Backend + PpispGridOps<B>>(
     use burn::tensor::Slice;
     let sl = |r: std::ops::Range<usize>| -> Slice { r.into() };
 
-    let device = B::float_device(&rgb);
+    let device = rgb.device();
     let num_cameras = vignetting.shape().dims::<3>()[0];
 
     let (grad_grids, vig_partials, grad_rgb) = B::ppisp_grid_bwd_raw(

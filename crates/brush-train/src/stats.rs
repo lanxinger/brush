@@ -77,7 +77,7 @@ mod tests {
             .into_data_async()
             .await
             .expect("readback")
-            .into_vec::<f32>()
+            .try_into_vec::<f32>()
             .expect("f32 tensor")
     }
 
