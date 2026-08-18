@@ -335,11 +335,16 @@ pub(crate) async fn train_stream(
             let client = WgpuRuntime::<AutoCompiler>::client(&wgpu_device);
             client.memory_cleanup();
 
-            dataloader = SceneLoader::new(
-                lod_scene.as_ref().unwrap_or(&dataset.train),
-                process_config.seed,
-                &train_stream_config.load_config,
-            );
+            // Only rebuild the loader when the images actually changed size.
+            // A rebuild throws away a warm batch cache and re-decodes the
+            // whole dataset, which at 100% scale buys nothing.
+            if let Some(lod_scene) = lod_scene.as_ref() {
+                dataloader = SceneLoader::new(
+                    lod_scene,
+                    process_config.seed,
+                    &train_stream_config.load_config,
+                );
+            }
 
             let appearance = trainer.take_appearance();
             let bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
@@ -616,7 +621,7 @@ mod tests {
         );
         // apple.png is 64x54. A 32px cap followed by 0.5 LOD scale yields
         // the exact 16x13 dimensions consumed by `LoadImage::load`.
-        let image = LoadImage::new(vfs, "apple.png".into(), None, 32, None).with_scale(0.5);
+        let image = LoadImage::new(vfs, "apple.png".into(), None, 32, None, false).with_scale(0.5);
         assert_eq!(image.output_dimensions().await.unwrap(), (16, 13));
         let loaded = image.load().await.expect("fixture decode");
         assert_eq!((loaded.width(), loaded.height()), (16, 13));

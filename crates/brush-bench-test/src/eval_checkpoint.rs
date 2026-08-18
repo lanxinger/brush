@@ -43,6 +43,10 @@ mod native {
         #[arg(long, value_enum)]
         alpha_mode: AlphaMode,
 
+        /// Invert mask images, so white means "ignore this pixel" instead of "keep it".
+        #[arg(long)]
+        invert_masks: bool,
+
         /// Optional directory for rendered evaluation PNG images.
         #[arg(long)]
         save_dir: Option<PathBuf>,
@@ -172,6 +176,7 @@ mod native {
             subsample_points: None,
             alpha_mode: Some(args.alpha_mode),
             train_on_eval: false,
+            invert_masks: args.invert_masks,
             // Evaluation loads each held-out view exactly once; retain the
             // conventional native budget for loader/config parity.
             max_scene_batch_cache_size: 6 * 1024 * 1024 * 1024,
@@ -274,6 +279,7 @@ mod native {
                 "requested_eval_split_every": args.eval_split_every,
                 "eval_selection": "dataset-loader-held-out",
                 "alpha_mode": alpha_mode_name(args.alpha_mode),
+                "invert_masks": args.invert_masks,
                 "avg_psnr": metric_value_json(avg_psnr),
                 "avg_ssim": metric_value_json(avg_ssim),
                 "warnings": warnings,
@@ -294,8 +300,8 @@ mod native {
         use clap::Parser;
         use std::path::PathBuf;
 
-        fn args() -> Args {
-            Args::try_parse_from([
+        fn args_with(extra: &[&str]) -> Args {
+            let mut argv = vec![
                 "brush-eval-checkpoint",
                 "--dataset",
                 "dataset",
@@ -303,8 +309,13 @@ mod native {
                 "checkpoint.ply",
                 "--alpha-mode",
                 "masked",
-            ])
-            .expect("valid args")
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).expect("valid args")
+        }
+
+        fn args() -> Args {
+            args_with(&[])
         }
 
         #[test]
@@ -315,8 +326,14 @@ mod native {
             assert_eq!(args.max_resolution, 1920);
             assert_eq!(args.eval_split_every, 20);
             assert_eq!(args.alpha_mode, AlphaMode::Masked);
+            assert!(!args.invert_masks);
             assert_eq!(args.save_dir, None);
             validate_args(&args).expect("defaults are valid");
+        }
+
+        #[test]
+        fn parses_mask_inversion() {
+            assert!(args_with(&["--invert-masks"]).invert_masks);
         }
 
         #[test]

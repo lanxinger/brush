@@ -1102,7 +1102,6 @@ dependencies = [
  "brush-serde",
  "brush-vfs",
  "burn",
- "bytemuck",
  "clap",
  "colmap-reader",
  "getrandom 0.4.3",

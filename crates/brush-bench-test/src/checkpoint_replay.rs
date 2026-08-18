@@ -13,7 +13,7 @@ mod native {
     use brush_dataset::{
         config::LoadDatasetConfig,
         load_dataset,
-        scene::{SceneBatch, sample_to_packed_data, view_to_sample_image},
+        scene::{SceneBatch, view_to_packed_data},
     };
     use brush_render::{
         AlphaMode, bwd::burn_glue::lift_splats_to_autodiff, gaussian_splats::SplatRenderMode,
@@ -24,7 +24,11 @@ mod native {
         train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds},
     };
     use brush_vfs::BrushVfs;
-    use burn::{module::AutodiffModule, prelude::Device, tensor::Tensor};
+    use burn::{
+        module::AutodiffModule,
+        prelude::Device,
+        tensor::{Tensor, TensorData},
+    };
     use clap::Parser;
 
     #[derive(Debug, Parser)]
@@ -53,6 +57,10 @@ mod native {
         /// How alpha from images or masks participates in the loss.
         #[arg(long, value_enum)]
         alpha_mode: Option<AlphaMode>,
+
+        /// Invert mask images, so white means "ignore this pixel" instead of "keep it".
+        #[arg(long)]
+        invert_masks: bool,
 
         /// Untimed steps used to compile pipelines and initialize optimizer state.
         #[arg(long, default_value_t = 4)]
@@ -121,6 +129,7 @@ mod native {
             subsample_points: None,
             alpha_mode: args.alpha_mode,
             train_on_eval: false,
+            invert_masks: args.invert_masks,
             // The replay owns its few decoded views directly, so the scene-loader
             // cache is unused. Keep the conventional value for config parity.
             max_scene_batch_cache_size: 6 * 1024 * 1024 * 1024,
@@ -142,10 +151,12 @@ mod native {
                     scene.views.len()
                 )
             })?;
-            let sample = view_to_sample_image(image, view.image.alpha_mode());
-            let (img_packed, has_alpha) = sample_to_packed_data(sample);
+            let (img_packed, has_alpha) = view_to_packed_data(image, view.image.alpha_mode());
             let batch = SceneBatch {
-                img_packed,
+                // Replay retains these batches directly rather than going through
+                // SceneLoader. Share the allocation once so timed clones only bump
+                // a refcount instead of copying the packed image bytes.
+                img_packed: share_packed(img_packed),
                 has_alpha,
                 alpha_mode: view.image.alpha_mode(),
                 camera: view.camera,
@@ -161,6 +172,10 @@ mod native {
         }
 
         Ok((batches, view_labels))
+    }
+
+    fn share_packed(data: TensorData) -> TensorData {
+        TensorData::from_bytes(data.bytes.shared(), data.shape, data.dtype)
     }
 
     async fn load_checkpoint(
@@ -334,6 +349,7 @@ mod native {
 
         println!("checkpoint: {}", args.ply.display());
         println!("dataset: {}", args.dataset.display());
+        println!("invert masks: {}", args.invert_masks);
         println!("splats: {splat_count}");
         println!("views: {} ({})", batches.len(), view_labels.join(", "));
         println!("refinement weight: {compute_refine_weight}");
@@ -351,7 +367,8 @@ mod native {
         );
         println!("final loss: {final_loss:.9}");
         println!(
-            "BRUSH_REPLAY_RESULT compiler={compiler} native_msl_preset_requested={preset_requested} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} coalesced_sh_grad_requested={coalesced_sh_grad_requested} saved_loss_partials_requested={saved_loss_partials_requested} sparse_sh_adam_requested={sparse_sh_adam_requested} fine_raster_tiles_requested={fine_raster_tiles_requested} compute_refine_weight={compute_refine_weight} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6} final_loss={final_loss:.9}",
+            "BRUSH_REPLAY_RESULT compiler={compiler} native_msl_preset_requested={preset_requested} unchecked_raster_requested={unchecked_raster_requested} fused_sh_adam_requested={fused_sh_adam_requested} coalesced_sh_grad_requested={coalesced_sh_grad_requested} saved_loss_partials_requested={saved_loss_partials_requested} sparse_sh_adam_requested={sparse_sh_adam_requested} fine_raster_tiles_requested={fine_raster_tiles_requested} compute_refine_weight={compute_refine_weight} invert_masks={} seed={} splats={splat_count} views={} view_set={} samples={} steps_per_sample={} warmup_steps={} median_ms={median:.6} p95_ms={p95:.6} mean_ms={mean:.6} min_ms={min:.6} max_ms={max:.6} steps_per_s={:.6} final_loss={final_loss:.9}",
+            args.invert_masks,
             args.seed,
             batches.len(),
             view_labels.join(","),
@@ -369,7 +386,26 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use super::{median, percentile};
+        use super::{Args, median, percentile};
+        use clap::Parser;
+
+        fn args(extra: &[&str]) -> Args {
+            let mut argv = vec![
+                "brush-checkpoint-replay",
+                "--dataset",
+                "dataset",
+                "--ply",
+                "checkpoint.ply",
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).expect("valid replay args")
+        }
+
+        #[test]
+        fn mask_inversion_defaults_off_and_parses_true() {
+            assert!(!args(&[]).invert_masks);
+            assert!(args(&["--invert-masks"]).invert_masks);
+        }
 
         #[test]
         fn percentile_uses_nearest_rank() {

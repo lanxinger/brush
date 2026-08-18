@@ -331,6 +331,21 @@ mod tests {
     }
 
     #[wasm_bindgen_test(unsupported = test)]
+    fn test_mask_inversion_round_trip() {
+        let mut original = TrainStreamConfig::default();
+        original.load_config.invert_masks = true;
+
+        let args = config_to_args(&original);
+        assert_eq!(args, ["--invert-masks"]);
+
+        let mut cli_args = vec!["brush".to_owned()];
+        cli_args.extend(args);
+        let parsed = TrainStreamConfig::try_parse_from(cli_args).expect("config should round-trip");
+
+        assert!(parsed.load_config.invert_masks);
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_config_string_round_trip_preserves_spaces() {
         let mut original = TrainStreamConfig::default();
         original.process_config.export_path = "./exports with spaces/{dataset}/".to_owned();

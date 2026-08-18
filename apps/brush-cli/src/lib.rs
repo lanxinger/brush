@@ -449,6 +449,24 @@ mod tests {
     }
 
     #[test]
+    fn parsed_explicit_false_disables_saved_mask_inversion() {
+        let parsed =
+            Cli::try_parse_from_with_explicit_fields(["brush", "dataset", "--invert-masks=false"])
+                .expect("CLI should parse an explicit false mask override");
+        let mut initial = TrainStreamConfig::default();
+        initial.load_config.invert_masks = true;
+
+        let merged = brush_process::args_file::merge_explicit_cli_fields(
+            &initial,
+            &parsed.train_stream,
+            &parsed.explicit_train_fields,
+        );
+
+        assert_eq!(parsed.explicit_train_fields, vec!["invert-masks"]);
+        assert!(!merged.load_config.invert_masks);
+    }
+
+    #[test]
     fn optional_boolean_does_not_consume_following_source() {
         let bare = Cli::try_parse_from_with_explicit_fields([
             "brush",
