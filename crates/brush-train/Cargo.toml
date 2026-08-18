@@ -10,7 +10,6 @@ debug-validation = ["brush-render/debug-validation"]
 native-msl = [
     "brush-loss/native-msl",
     "brush-render/native-msl",
-    "burn-wgpu/metal",
 ]
 
 [dependencies]
