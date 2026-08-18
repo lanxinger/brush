@@ -149,7 +149,7 @@ async fn read_finite(output: Tensor<3>) -> Vec<f32> {
         .to_data_async()
         .await
         .expect("readback")
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("data vec");
     assert!(data.iter().all(|v| v.is_finite()), "NaNs or infs in output");
     data
@@ -513,7 +513,7 @@ async fn renders_large_rotated_splats() {
         .to_data_async()
         .await
         .expect("readback alpha")
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("alpha vec");
 
     let tile = 16usize;
@@ -575,7 +575,7 @@ async fn renders_many_large_splats_stress() {
         .to_data_async()
         .await
         .expect("readback")
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("data vec");
     assert!(data.iter().all(|v| v.is_finite()), "NaNs in output");
 
@@ -694,7 +694,7 @@ async fn zero_splats_renders_background() {
     let pixels = MainBackendBase::float_into_data(output.out_img)
         .await
         .expect("readback")
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("data vec");
     let n_pixels = (img_size.x * img_size.y) as usize;
     assert_eq!(pixels.len(), n_pixels * 4);
@@ -742,7 +742,7 @@ async fn zero_splats_renders_packed_background() {
     let pixels = MainBackendBase::float_into_data(output.out_img)
         .await
         .expect("readback")
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("data vec");
     let expected = ((bg.x * 255.0).clamp(0.0, 255.0) as u32)
         | (((bg.y * 255.0).clamp(0.0, 255.0) as u32) << 8)

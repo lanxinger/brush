@@ -11,8 +11,14 @@
 //! away from f16 quantization limits) so central differences are
 //! second-order accurate.
 
+#[cfg(not(target_family = "wasm"))]
+use brush_render::bwd::render_splats_for_training;
 use brush_render::gaussian_splats::{RasterPass, Rasterizer};
 use brush_render::{
+    bwd::{
+        render_splats_with_pass, render_splats_with_pass_and_rasterizer,
+        render_splats_with_refine_weight,
+    },
     camera::Camera,
     gaussian_splats::{SplatRenderMode, Splats},
     kernels::camera_model::{
@@ -20,13 +26,6 @@ use brush_render::{
         radial_tangential_8::RadialTangential8Params, thin_prism_fisheye::ThinPrismFisheyeParams,
     },
 };
-#[cfg(not(target_family = "wasm"))]
-use brush_render_bwd::render_splats_for_training;
-use brush_render_bwd::{
-    render_splats_with_pass, render_splats_with_pass_and_rasterizer,
-    render_splats_with_refine_weight,
-};
-
 /// Finite-diff tests need the C^1 cutoff so analytical and numerical
 /// agree at typical eps; production paths use the hard step.
 const PASS: RasterPass = RasterPass::BackwardSmoothCutoff;
@@ -174,7 +173,7 @@ async fn read_first<const D: usize>(t: Tensor<D>) -> f32 {
     t.into_data_async()
         .await
         .expect("readback")
-        .into_vec::<f32>()
+        .try_into_vec::<f32>()
         .expect("vec")[0]
 }
 
@@ -182,7 +181,7 @@ async fn read_vec<const D: usize>(t: Tensor<D>) -> Vec<f32> {
     t.into_data_async()
         .await
         .expect("readback")
-        .into_vec::<f32>()
+        .try_into_vec::<f32>()
         .expect("vec")
 }
 
@@ -575,7 +574,7 @@ async fn finite_diff_tangential_quat() {
         .into_data_async()
         .await
         .expect("rb")
-        .into_vec::<f32>()
+        .try_into_vec::<f32>()
         .expect("v");
 
     // Radial direction (parallel to identity quat) must have ~0 grad —

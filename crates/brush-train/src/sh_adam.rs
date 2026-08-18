@@ -1117,42 +1117,42 @@ mod tests {
             .into_data_async()
             .await
             .expect("reference parameter readback")
-            .to_vec()
+            .try_to_vec()
             .expect("reference parameter type");
         let expected_moment_1: Vec<f32> = expected
             .1
             .into_data_async()
             .await
             .expect("reference moment_1 readback")
-            .to_vec()
+            .try_to_vec()
             .expect("reference moment_1 type");
         let expected_moment_2: Vec<f32> = expected
             .2
             .into_data_async()
             .await
             .expect("reference moment_2 readback")
-            .to_vec()
+            .try_to_vec()
             .expect("reference moment_2 type");
         let actual_param: Vec<f32> = actual
             .0
             .into_data_async()
             .await
             .expect("fused parameter readback")
-            .to_vec()
+            .try_to_vec()
             .expect("fused parameter type");
         let actual_moment_1: Vec<f32> = actual
             .1
             .into_data_async()
             .await
             .expect("fused moment_1 readback")
-            .to_vec()
+            .try_to_vec()
             .expect("fused moment_1 type");
         let actual_moment_2: Vec<f32> = actual
             .2
             .into_data_async()
             .await
             .expect("fused moment_2 readback")
-            .to_vec()
+            .try_to_vec()
             .expect("fused moment_2 type");
 
         let case = format!("N={num_splats}, C={coeffs}, time={time}");
@@ -1439,13 +1439,13 @@ mod tests {
                 .into_data_async()
                 .await
                 .expect("sparse output readback")
-                .to_vec()
+                .try_to_vec()
                 .expect("sparse output type");
             let expected: Vec<f32> = expected
                 .into_data_async()
                 .await
                 .expect("dense output readback")
-                .to_vec()
+                .try_to_vec()
                 .expect("dense output type");
             let case = format!("sparse degree {degree}, zero_visible={zero_visible}, {label}");
             // The reference SH row is evaluated on the CPU, where FMA

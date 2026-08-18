@@ -54,6 +54,7 @@ impl SplatOps for MainBackendBase {
         transforms: FloatTensor<Self>,
         sh_coeffs: FloatTensor<Self>,
         raw_opacities: FloatTensor<Self>,
+        _refine_weight: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: RasterPass,
@@ -197,6 +198,9 @@ impl SplatRasterizerOps for MainBackendBase {
                     global_from_compact_gid.clone().into_tensor_arg(),
                     visible.clone().into_tensor_arg(),
                     uniforms,
+                    // Precomputed divisor for the tiles-per-row split in the
+                    // per-pixel index math, including the empty-scene path.
+                    project_uniforms.tile_bounds[0],
                     bwd_info,
                     smooth_cutoff,
                     tile_width,
@@ -311,11 +315,11 @@ impl SplatRasterizerOps for MainBackendBase {
                 .expect("Failed to read counts");
             let num_visible = data.read_ints[0]
                 .clone()
-                .into_vec::<u32>()
+                .try_into_vec::<u32>()
                 .expect("num_visible")[0];
             let num_intersections = data.read_ints[1]
                 .clone()
-                .into_vec::<u32>()
+                .try_into_vec::<u32>()
                 .expect("num_intersections")[0];
             (num_visible, num_intersections)
         };
@@ -414,7 +418,7 @@ impl SplatRasterizerOps for MainBackendBase {
                     .expect("failed to read pre-raster tile offsets for raster census");
                 let pre_offsets = data.read_ints[0]
                     .clone()
-                    .into_vec::<u32>()
+                    .try_into_vec::<u32>()
                     .expect("raster census tile offsets must be u32");
                 Some((request, pre_offsets))
             } else {
@@ -464,6 +468,9 @@ impl SplatRasterizerOps for MainBackendBase {
                 global_from_compact_gid.clone().into_tensor_arg(),
                 visible.clone().into_tensor_arg(),
                 uniforms,
+                // Precomputed divisor for the tiles-per-row split in the
+                // per-pixel index math.
+                project_uniforms.tile_bounds[0],
                 bwd_info,
                 smooth_cutoff,
                 tile_width,
@@ -483,15 +490,15 @@ impl SplatRasterizerOps for MainBackendBase {
                 .expect("failed to read raster census inputs");
             let projected_splats_host = data.read_floats[0]
                 .clone()
-                .into_vec::<f32>()
+                .try_into_vec::<f32>()
                 .expect("raster census projected splats must be f32");
             let compact_gid_from_isect_host = data.read_ints[0]
                 .clone()
-                .into_vec::<u32>()
+                .try_into_vec::<u32>()
                 .expect("raster census compact IDs must be u32");
             let post_offsets = data.read_ints[1]
                 .clone()
-                .into_vec::<u32>()
+                .try_into_vec::<u32>()
                 .expect("raster census tile offsets must be u32");
             let report = crate::raster_census::analyze(&crate::raster_census::RasterCensusInput {
                 request,

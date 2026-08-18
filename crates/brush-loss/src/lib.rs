@@ -1800,7 +1800,7 @@ mod tests {
             Some(kernels::BWD_TILE_SMALL),
         );
         let small: Vec<f32> = burn_cubecl::ops::into_data_sync(small)
-            .to_vec()
+            .try_to_vec()
             .expect("small-tile gradient data");
         assert!(
             small.iter().all(|value| value.is_finite()),
@@ -1818,7 +1818,7 @@ mod tests {
             Some(kernels::BWD_TILE_LARGE),
         );
         let large: Vec<f32> = burn_cubecl::ops::into_data_sync(large)
-            .to_vec()
+            .try_to_vec()
             .expect("large-tile gradient data");
 
         for (index, (&small, &large)) in small.iter().zip(&large).enumerate() {
@@ -1895,16 +1895,16 @@ mod tests {
             launch_image_backward_saved(make_pred(), make_gt(), make_chain(), partials, cfg);
 
         let control_map: Vec<f32> = burn_cubecl::ops::into_data_sync(control_map)
-            .to_vec()
+            .try_to_vec()
             .expect("control map data");
         let saved_map: Vec<f32> = burn_cubecl::ops::into_data_sync(saved_map)
-            .to_vec()
+            .try_to_vec()
             .expect("saved map data");
         let control_grad: Vec<f32> = burn_cubecl::ops::into_data_sync(control_grad)
-            .to_vec()
+            .try_to_vec()
             .expect("control gradient data");
         let saved_grad: Vec<f32> = burn_cubecl::ops::into_data_sync(saved_grad)
-            .to_vec()
+            .try_to_vec()
             .expect("saved gradient data");
 
         assert_close("forward map", &control_map, &saved_map);

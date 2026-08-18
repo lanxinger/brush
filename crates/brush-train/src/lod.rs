@@ -1,7 +1,7 @@
 use brush_dataset::scene::{sample_to_packed_data, view_to_sample_image};
 use brush_loss::{ImageLossConfig, image_loss};
+use brush_render::bwd::render_splats;
 use brush_render::gaussian_splats::Splats;
-use brush_render_bwd::render_splats;
 use burn::{
     prelude::Module,
     tensor::{Device, Int, Tensor, TensorData, s},
@@ -136,7 +136,7 @@ pub async fn compute_pup_scores(
         .into_data_async()
         .await
         .expect("Failed to read Hessian accumulator")
-        .into_vec()
+        .try_into_vec()
         .expect("Failed to convert Hessian data");
 
     hessian_data
@@ -180,7 +180,7 @@ mod tests {
             .into_data_async()
             .await
             .expect("scale readback")
-            .to_vec()
+            .try_to_vec()
             .expect("f32 scales");
         // The selected raw scales are still exactly 1.0. Only the new floor is
         // applied; the old 0.2/0.3 values must not be baked underneath it.

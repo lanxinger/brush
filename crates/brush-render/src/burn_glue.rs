@@ -36,8 +36,8 @@ pub type AutodiffMain = Autodiff<MainBackend>;
 // a wgpu device, so every helper here assumes a `DispatchTensorKind::Wgpu`
 // (optionally wrapped in `Autodiff`) and panics otherwise. The forward render
 // now goes through the `#[backend_extension]`-generated `Dispatch` impl
-// instead; these stay for the hand-rolled backward path (brush-render-bwd)
-// and the LPIPS custom ops (brush-loss).
+// instead; these stay for the hand-rolled backward path in `crate::bwd` and
+// the LPIPS custom ops (brush-loss).
 // ---------------------------------------------------------------------------
 
 /// Extract the inner fusion-Wgpu float tensor from a non-autodiff
@@ -167,6 +167,7 @@ pub fn detach_autodiff<const D: usize>(t: Tensor<D>) -> Tensor<D> {
 /// inner/autodiff folds (e.g. `fold_min_scale`) need — a lifted constant then
 /// degrades to the inner backend on the next op and trips a cross-backend
 /// assert. Keep the hand-rolled lift.
+#[doc(hidden)]
 pub fn lift_to_autodiff<const D: usize>(t: Tensor<D>) -> Tensor<D> {
     let dispatch: DispatchTensor = t.into_dispatch();
     match dispatch.kind {
@@ -189,7 +190,7 @@ fn is_autodiff<const D: usize>(t: &Tensor<D>) -> bool {
 /// keeps some frozen tensors (e.g. the 3D-filter floor) on the inner backend
 /// but folds them against params that may be lifted to autodiff; this aligns
 /// both operands so dispatch ops don't trip a cross-backend assertion.
-pub fn match_backend<const D: usize, const DR: usize>(
+pub(crate) fn match_backend<const D: usize, const DR: usize>(
     t: Tensor<D>,
     reference: &Tensor<DR>,
 ) -> Tensor<D> {
@@ -229,6 +230,7 @@ impl SplatOps for Fusion<MainBackendBase> {
         transforms: FloatTensor<Self>,
         sh_coeffs: FloatTensor<Self>,
         raw_opacities: FloatTensor<Self>,
+        _refine_weight: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: crate::gaussian_splats::RasterPass,
@@ -273,7 +275,6 @@ impl SplatRasterizerOps for Fusion<MainBackendBase> {
         let base_raw_opac = client
             .clone()
             .resolve_tensor_float::<MainBackendBase>(raw_opacities);
-
         // Run the full pipeline on MainBackendBase.
         let out = <MainBackendBase as SplatRasterizerOps>::render_with_rasterizer(
             camera,
@@ -339,41 +340,16 @@ impl SplatRasterizerOps for Fusion<MainBackendBase> {
             }
         }
 
-        let out_img_ir = TensorIr::uninit(
-            client.create_empty_handle(),
-            out.out_img.shape(),
-            DType::F32,
-        );
-        let visible_ir = TensorIr::uninit(
-            client.create_empty_handle(),
-            out.aux.visible.shape(),
-            DType::F32,
-        );
-        let max_radius_ir = TensorIr::uninit(
-            client.create_empty_handle(),
-            out.aux.max_radius.shape(),
-            DType::F32,
-        );
-        let projected_splats_ir = TensorIr::uninit(
-            client.create_empty_handle(),
-            out.projected_splats.shape(),
-            DType::F32,
-        );
-        let tile_offsets_ir = TensorIr::uninit(
-            client.create_empty_handle(),
-            out.aux.tile_offsets.shape(),
-            DType::U32,
-        );
-        let compact_gid_from_isect_ir = TensorIr::uninit(
-            client.create_empty_handle(),
-            out.compact_gid_from_isect.shape(),
-            DType::U32,
-        );
-        let global_from_compact_gid_ir = TensorIr::uninit(
-            client.create_empty_handle(),
-            out.global_from_compact_gid.shape(),
-            DType::U32,
-        );
+        // Every output is a fresh handle the bind op fills in; only shape and
+        // dtype differ.
+        let new_out = |shape, dtype| TensorIr::uninit(client.create_empty_handle(), shape, dtype);
+        let out_img_ir = new_out(out.out_img.shape(), DType::F32);
+        let visible_ir = new_out(out.aux.visible.shape(), DType::F32);
+        let max_radius_ir = new_out(out.aux.max_radius.shape(), DType::F32);
+        let projected_splats_ir = new_out(out.projected_splats.shape(), DType::F32);
+        let tile_offsets_ir = new_out(out.aux.tile_offsets.shape(), DType::U32);
+        let compact_gid_from_isect_ir = new_out(out.compact_gid_from_isect.shape(), DType::U32);
+        let global_from_compact_gid_ir = new_out(out.global_from_compact_gid.shape(), DType::U32);
 
         let stream = StreamId::current();
         let desc = CustomOpIr::new(
