@@ -79,16 +79,23 @@ impl LoadImage {
             let mask_img = image::load_from_memory(&mask_bytes)?;
 
             // Only one channel of the mask ever reaches the alpha channel, so
-            // reduce it to 8bpp before doing any work on it. A grayscale mask
-            // (the usual case) then costs no conversion at all, and the resize
-            // below runs over one channel instead of three or four.
-            let mut mask = if mask_img.color().has_alpha() {
-                let rgba = mask_img.into_rgba8();
-                let (w, h) = rgba.dimensions();
-                let alpha = rgba.pixels().map(|p| p[3]).collect();
-                GrayImage::from_raw(w, h, alpha).expect("one byte per pixel")
-            } else {
-                mask_img.into_luma8()
+            // reduce it to 8bpp before doing any work on it. Keep the previous
+            // channel semantics: use alpha when present, otherwise channel 0.
+            // A grayscale mask (the usual case) needs no conversion.
+            let mut mask = match mask_img {
+                DynamicImage::ImageLuma8(mask) => mask,
+                mask_img if mask_img.color().has_alpha() => {
+                    let rgba = mask_img.into_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let alpha = rgba.pixels().map(|p| p[3]).collect();
+                    GrayImage::from_raw(w, h, alpha).expect("one byte per pixel")
+                }
+                mask_img => {
+                    let rgb = mask_img.into_rgb8();
+                    let (w, h) = rgb.dimensions();
+                    let first = rgb.pixels().map(|p| p[0]).collect();
+                    GrayImage::from_raw(w, h, first).expect("one byte per pixel")
+                }
             };
 
             // Resize mask image if needed. This is allowed to squash the mask.
@@ -283,5 +290,16 @@ mod tests {
         let img = load_with_mask(mask.into(), true).await;
         let alpha: Vec<u8> = img.pixels().map(|p| p[3]).collect();
         assert_eq!(alpha, (0..8).map(|i| 255 - i * 30).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn rgb_mask_preserves_first_channel_as_alpha() {
+        let mask = RgbImage::from_fn(4, 2, |x, y| {
+            let first = ((y * 4 + x) * 30) as u8;
+            Rgb([first, 255 - first, 17])
+        });
+        let img = load_with_mask(mask.into(), false).await;
+        let alpha: Vec<u8> = img.pixels().map(|p| p[3]).collect();
+        assert_eq!(alpha, (0..8).map(|i| i * 30).collect::<Vec<_>>());
     }
 }
