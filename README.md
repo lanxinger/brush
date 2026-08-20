@@ -53,6 +53,11 @@ Brush also can load .zip of splat files to display them as an animation, or a sp
 ## CLI
 Brush can be used as a CLI. Run `brush --help` to get an overview. Every CLI command can work with `--with-viewer` which also opens the UI, for easy debugging.
 
+For lightweight machine-readable training telemetry, set `BRUSH_METRICS_LOG`
+to a JSONL output path. Brush replaces that file for each run and writes a run
+header plus the first, final, and every 50th training step. Override the cadence
+with a positive `BRUSH_METRICS_EVERY` value.
+
 ## Rerun
 
 https://github.com/user-attachments/assets/f679fec0-935d-4dd2-87e1-c301db9cdc2c
