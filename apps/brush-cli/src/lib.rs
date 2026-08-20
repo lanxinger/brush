@@ -23,7 +23,7 @@ use tracing::trace_span;
 #[derive(Parser)]
 #[command(
     author,
-    version,
+    version = env!("BRUSH_VERSION"),
     arg_required_else_help = false,
     about = "Brush - universal splats"
 )]
@@ -565,5 +565,14 @@ mod tests {
     #[test]
     fn rejects_unknown_flag() {
         assert!(Cli::try_parse_from(["brush-cli", "--not-a-real-flag"]).is_err());
+    }
+
+    #[test]
+    fn version_includes_build_provenance() {
+        let command = Cli::command();
+        let version = command.get_version().expect("version is configured");
+
+        assert!(version.contains(env!("CARGO_PKG_VERSION")));
+        assert!(version.contains(env!("BRUSH_BUILD_ID")));
     }
 }
