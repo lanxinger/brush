@@ -34,6 +34,9 @@ pub enum TrainMessage {
         iter: u32,
         avg_psnr: f32,
         avg_ssim: f32,
+        avg_masked_psnr: Option<f32>,
+        avg_masked_ssim: Option<f32>,
+        mean_mask_coverage: Option<f32>,
     },
     DoneTraining,
 }

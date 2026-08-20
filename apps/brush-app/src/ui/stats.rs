@@ -154,8 +154,22 @@ impl AppPane for StatsPanel {
                     iter: _,
                     avg_psnr,
                     avg_ssim,
+                    avg_masked_psnr,
+                    avg_masked_ssim,
+                    mean_mask_coverage,
                 } => {
-                    self.last_eval = Some(format!("{avg_psnr:.2} PSNR, {avg_ssim:.3} SSIM"));
+                    let masked = avg_masked_psnr
+                        .zip(*avg_masked_ssim)
+                        .zip(*mean_mask_coverage)
+                        .map(|((psnr, ssim), coverage)| {
+                            format!(
+                                ", {psnr:.2} masked PSNR, {ssim:.3} masked SSIM ({:.1}% mask)",
+                                coverage * 100.0
+                            )
+                        })
+                        .unwrap_or_default();
+                    self.last_eval =
+                        Some(format!("{avg_psnr:.2} PSNR, {avg_ssim:.3} SSIM{masked}"));
                 }
                 TrainMessage::DoneTraining => {
                     self.training_complete = true;

@@ -345,11 +345,24 @@ pub async fn run_cli_ui(
                     iter,
                     avg_psnr,
                     avg_ssim,
+                    avg_masked_psnr,
+                    avg_masked_ssim,
+                    mean_mask_coverage,
                 } => {
                     log::info!("Eval iter {iter}: PSNR {avg_psnr}, ssim {avg_ssim}");
 
+                    let masked = avg_masked_psnr
+                        .zip(avg_masked_ssim)
+                        .zip(mean_mask_coverage)
+                        .map(|((psnr, ssim), coverage)| {
+                            format!(
+                                ", masked PSNR {psnr:.2}, masked SSIM {ssim:.3} ({:.1}% coverage)",
+                                coverage * 100.0
+                            )
+                        })
+                        .unwrap_or_default();
                     eval_spinner.set_message(format!(
-                        "Eval iter {iter}: PSNR {avg_psnr}, ssim {avg_ssim}"
+                        "Eval iter {iter}: PSNR {avg_psnr:.2}, SSIM {avg_ssim:.3}{masked}"
                     ));
                 }
                 TrainMessage::DoneTraining => {}

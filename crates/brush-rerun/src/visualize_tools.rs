@@ -344,13 +344,29 @@ mod visualize_tools_impl {
         }
 
         #[allow(unused_variables)]
-        pub fn log_eval_stats(&self, iter: u32, avg_psnr: f32, avg_ssim: f32) -> Result<()> {
+        pub fn log_eval_stats(
+            &self,
+            iter: u32,
+            avg_psnr: f32,
+            avg_ssim: f32,
+            masked: Option<(f32, f32, f32)>,
+        ) -> Result<()> {
             if self.rec.is_enabled() {
                 self.rec.set_time_sequence("iterations", iter);
                 self.rec
                     .log("psnr/eval", &rerun::Scalars::new(vec![avg_psnr as f64]))?;
                 self.rec
                     .log("ssim/eval", &rerun::Scalars::new(vec![avg_ssim as f64]))?;
+                if let Some((psnr, ssim, coverage)) = masked {
+                    self.rec
+                        .log("psnr/eval_masked", &rerun::Scalars::new(vec![psnr as f64]))?;
+                    self.rec
+                        .log("ssim/eval_masked", &rerun::Scalars::new(vec![ssim as f64]))?;
+                    self.rec.log(
+                        "mask/eval_coverage",
+                        &rerun::Scalars::new(vec![coverage as f64]),
+                    )?;
+                }
             }
             Ok(())
         }
@@ -419,6 +435,24 @@ mod visualize_tools_impl {
                     eval.ssim.clone().into_scalar_async::<f32>().await? as f64,
                 ]),
             )?;
+            if let Some(masked) = eval.masked {
+                self.rec.log(
+                    format!("psnr_masked/per_view/{index}"),
+                    &rerun::Scalars::new(vec![
+                        masked.psnr.into_scalar_async::<f32>().await? as f64,
+                    ]),
+                )?;
+                self.rec.log(
+                    format!("ssim_masked/per_view/{index}"),
+                    &rerun::Scalars::new(vec![
+                        masked.ssim.into_scalar_async::<f32>().await? as f64,
+                    ]),
+                )?;
+                self.rec.log(
+                    format!("mask_coverage/per_view/{index}"),
+                    &rerun::Scalars::new(vec![eval.mask_coverage.unwrap_or(0.0) as f64]),
+                )?;
+            }
 
             Ok(())
         }
@@ -731,7 +765,13 @@ mod visualize_tools_impl {
 
         #[allow(unused_variables)]
         #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
-        pub fn log_eval_stats(&self, _iter: u32, _avg_psnr: f32, _avg_ssim: f32) -> Result<()> {
+        pub fn log_eval_stats(
+            &self,
+            _iter: u32,
+            _avg_psnr: f32,
+            _avg_ssim: f32,
+            _masked: Option<(f32, f32, f32)>,
+        ) -> Result<()> {
             Ok(())
         }
 

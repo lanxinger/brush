@@ -60,6 +60,9 @@ mod native {
         height: u32,
         psnr: f64,
         ssim: f64,
+        masked_psnr: Option<f64>,
+        masked_ssim: Option<f64>,
+        mask_coverage: Option<f64>,
     }
 
     fn validate_args(args: &Args) -> Result<()> {
@@ -81,6 +84,36 @@ mod native {
         });
         let count = metrics.len() as f64;
         Some((psnr / count, ssim / count))
+    }
+
+    fn masked_averages(metrics: &[ViewMetric]) -> Option<(f64, f64, f64, usize)> {
+        let values = metrics.iter().filter_map(|metric| {
+            Some((
+                metric.masked_psnr?,
+                metric.masked_ssim?,
+                metric.mask_coverage?,
+            ))
+        });
+        let (psnr, ssim, coverage, count) = values.fold(
+            (0.0, 0.0, 0.0, 0usize),
+            |(psnr, ssim, coverage, count), value| {
+                (
+                    psnr + value.0,
+                    ssim + value.1,
+                    coverage + value.2,
+                    count + 1,
+                )
+            },
+        );
+        (count > 0).then(|| {
+            let count_f64 = count as f64;
+            (
+                psnr / count_f64,
+                ssim / count_f64,
+                coverage / count_f64,
+                count,
+            )
+        })
     }
 
     fn validate_metric_values(psnr: f64, ssim: f64) -> Result<()> {
@@ -120,6 +153,9 @@ mod native {
             "height": metric.height,
             "psnr": metric_value_json(metric.psnr),
             "ssim": metric_value_json(metric.ssim),
+            "masked_psnr": metric.masked_psnr.map(metric_value_json),
+            "masked_ssim": metric.masked_ssim.map(metric_value_json),
+            "mask_coverage": metric.mask_coverage,
         })
     }
 
@@ -187,7 +223,7 @@ mod native {
         for warning in &loaded.warnings {
             println!("BRUSH_EVAL_WARNING {}", json!({ "message": warning }));
         }
-        let warnings = loaded.warnings;
+        let mut warnings = loaded.warnings;
         let eval_scene = loaded
             .dataset
             .eval
@@ -239,6 +275,35 @@ mod native {
             validate_metric_values(psnr, ssim)
                 .with_context(|| format!("invalid metrics for {image_name}"))?;
 
+            let mask_coverage = sample.mask_coverage.map(f64::from);
+            let (masked_psnr, masked_ssim) = if let Some(masked) = &sample.masked {
+                let psnr = masked
+                    .psnr
+                    .clone()
+                    .into_scalar_async::<f32>()
+                    .await
+                    .with_context(|| format!("failed to read masked PSNR for {image_name}"))?
+                    as f64;
+                let ssim = masked
+                    .ssim
+                    .clone()
+                    .into_scalar_async::<f32>()
+                    .await
+                    .with_context(|| format!("failed to read masked SSIM for {image_name}"))?
+                    as f64;
+                validate_metric_values(psnr, ssim)
+                    .with_context(|| format!("invalid masked metrics for {image_name}"))?;
+                (Some(psnr), Some(ssim))
+            } else {
+                if mask_coverage == Some(0.0) {
+                    let warning =
+                        format!("skipped masked metrics for {image_name}: alpha mask is empty");
+                    println!("BRUSH_EVAL_WARNING {}", json!({ "message": warning }));
+                    warnings.push(warning);
+                }
+                (None, None)
+            };
+
             if let Some(save_dir) = &args.save_dir {
                 let path = save_dir.join(render_file_name(index, &image_name));
                 sample
@@ -254,6 +319,9 @@ mod native {
                 height,
                 psnr,
                 ssim,
+                masked_psnr,
+                masked_ssim,
+                mask_coverage,
             };
             println!("BRUSH_EVAL_VIEW {}", metric_json(&metric));
             metrics.push(metric);
@@ -261,6 +329,7 @@ mod native {
 
         let (avg_psnr, avg_ssim) =
             averages(&metrics).context("dataset produced no held-out evaluation metrics")?;
+        let masked = masked_averages(&metrics);
         let compiler = if cfg!(all(feature = "native-msl", target_os = "macos")) {
             "native-msl"
         } else {
@@ -282,6 +351,10 @@ mod native {
                 "invert_masks": args.invert_masks,
                 "avg_psnr": metric_value_json(avg_psnr),
                 "avg_ssim": metric_value_json(avg_ssim),
+                "avg_masked_psnr": masked.map(|metrics| metric_value_json(metrics.0)),
+                "avg_masked_ssim": masked.map(|metrics| metric_value_json(metrics.1)),
+                "mean_mask_coverage": masked.map(|metrics| metrics.2),
+                "masked_views": masked.map_or(0, |metrics| metrics.3),
                 "warnings": warnings,
                 "per_view": per_view,
             })
@@ -293,8 +366,8 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::{
-            Args, ViewMetric, averages, metric_value_json, render_file_name, validate_args,
-            validate_metric_values,
+            Args, ViewMetric, averages, masked_averages, metric_value_json, render_file_name,
+            validate_args, validate_metric_values,
         };
         use brush_render::AlphaMode;
         use clap::Parser;
@@ -377,6 +450,9 @@ mod native {
                     height: 1,
                     psnr: 20.0,
                     ssim: 0.8,
+                    masked_psnr: Some(22.0),
+                    masked_ssim: Some(0.85),
+                    mask_coverage: Some(0.5),
                 },
                 ViewMetric {
                     index: 1,
@@ -385,10 +461,15 @@ mod native {
                     height: 2,
                     psnr: 30.0,
                     ssim: 1.0,
+                    masked_psnr: None,
+                    masked_ssim: None,
+                    mask_coverage: Some(0.0),
                 },
             ];
             assert_eq!(averages(&metrics), Some((25.0, 0.9)));
             assert_eq!(averages(&[]), None);
+            assert_eq!(masked_averages(&metrics), Some((22.0, 0.85, 0.5, 1)));
+            assert_eq!(masked_averages(&[]), None);
         }
 
         #[test]

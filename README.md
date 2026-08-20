@@ -290,7 +290,12 @@ cargo run --release -p brush-bench-test --bin brush-eval-checkpoint --features n
 ```
 
 The evaluator emits one `BRUSH_EVAL_VIEW` JSON record per held-out view and one
-aggregate `BRUSH_EVAL_RESULT` record. See the
+aggregate `BRUSH_EVAL_RESULT` record. Existing `psnr` and `ssim` fields remain
+full-frame metrics. When `--alpha-mode masked` is used with alpha-bearing
+images, the records also include mask-normalized metrics and coverage; empty
+masks are reported and excluded from masked aggregates. Masked SSIM weights
+window centres by alpha, so RGB outside the mask can still influence windows
+that cross the boundary. See the
 [egg 15k upstream-versus-macOS-preset bake-off](docs/performance/egg-15k-upstream-vs-macos-preset.md)
 for the frozen performance and quality baseline used by raster redesign work.
 

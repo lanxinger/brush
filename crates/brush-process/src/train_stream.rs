@@ -766,6 +766,10 @@ async fn run_eval(
     let mut psnr = 0.0;
     let mut ssim = 0.0;
     let mut count = 0;
+    let mut masked_psnr = 0.0;
+    let mut masked_ssim = 0.0;
+    let mut mask_coverage = 0.0;
+    let mut masked_count = 0;
     log::info!("Running evaluation for iteration {iter}");
 
     for (i, view) in eval_scene.views.iter().enumerate() {
@@ -794,6 +798,17 @@ async fn run_eval(
         count += 1;
         psnr += sample.psnr.clone().into_scalar_async::<f32>().await?;
         ssim += sample.ssim.clone().into_scalar_async::<f32>().await?;
+        if let Some(masked) = &sample.masked {
+            masked_count += 1;
+            masked_psnr += masked.psnr.clone().into_scalar_async::<f32>().await?;
+            masked_ssim += masked.ssim.clone().into_scalar_async::<f32>().await?;
+            mask_coverage += sample.mask_coverage.unwrap_or(0.0);
+        } else if sample.mask_coverage == Some(0.0) {
+            log::warn!(
+                "Skipping masked evaluation metrics for {} because its alpha mask is empty",
+                view.image.img_name()
+            );
+        }
 
         #[cfg(not(target_family = "wasm"))]
         if let Some(path) = &save_path {
@@ -813,12 +828,22 @@ async fn run_eval(
     }
     psnr /= count as f32;
     ssim /= count as f32;
-    visualize.log_eval_stats(iter, psnr, ssim)?;
+    let masked = (masked_count > 0).then(|| {
+        (
+            masked_psnr / masked_count as f32,
+            masked_ssim / masked_count as f32,
+            mask_coverage / masked_count as f32,
+        )
+    });
+    visualize.log_eval_stats(iter, psnr, ssim, masked)?;
     emitter
         .emit(ProcessMessage::TrainMessage(TrainMessage::EvalResult {
             iter,
             avg_psnr: psnr,
             avg_ssim: ssim,
+            avg_masked_psnr: masked.map(|metrics| metrics.0),
+            avg_masked_ssim: masked.map(|metrics| metrics.1),
+            mean_mask_coverage: masked.map(|metrics| metrics.2),
         }))
         .await;
 
