@@ -15,10 +15,9 @@ pub const BUILD_ID: &str = env!("BRUSH_BUILD_ID");
 /// Package version with the Git-derived build identifier.
 pub const VERSION: &str = env!("BRUSH_VERSION");
 
-use burn_wgpu::{
-    AutoCompiler, RuntimeOptions, WgpuDevice,
-    graphics::{AutoGraphicsApi, GraphicsApi},
-};
+#[cfg(not(target_os = "ios"))]
+use burn_wgpu::graphics::AutoGraphicsApi;
+use burn_wgpu::{AutoCompiler, RuntimeOptions, WgpuDevice, graphics::GraphicsApi};
 use wgpu::{Adapter, Device, Queue};
 
 use std::future::Future;
@@ -33,6 +32,13 @@ use burn_cubecl::cubecl::Runtime;
 use burn_wgpu::WgpuRuntime;
 use tokio_stream::{Stream, StreamExt};
 
+// AutoGraphicsApi has no iOS selection arm and falls back to Vulkan. Apple
+// mobile devices only expose Metal, so choose it explicitly on iOS.
+#[cfg(target_os = "ios")]
+type DefaultGraphicsApi = burn_wgpu::graphics::Metal;
+#[cfg(not(target_os = "ios"))]
+type DefaultGraphicsApi = AutoGraphicsApi;
+
 fn burn_options() -> RuntimeOptions {
     RuntimeOptions {
         tasks_max: 64,
@@ -41,7 +47,7 @@ fn burn_options() -> RuntimeOptions {
 }
 
 pub async fn burn_init_setup() -> WgpuDevice {
-    burn_wgpu::init_setup_async::<AutoGraphicsApi>(&WgpuDevice::DefaultDevice, burn_options())
+    burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::DefaultDevice, burn_options())
         .await;
     connect_device(WgpuDevice::DefaultDevice);
     WgpuDevice::DefaultDevice
@@ -57,7 +63,7 @@ pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuD
         adapter,
         device,
         queue,
-        backend: AutoGraphicsApi::backend(),
+        backend: DefaultGraphicsApi::backend(),
     };
     let burn = burn_wgpu::init_device(setup, burn_options());
     connect_device(burn.clone());
