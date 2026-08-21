@@ -27,23 +27,41 @@ fn git_is_dirty(repo: &Path) -> bool {
 }
 
 fn track_git_state(repo: &Path) {
+    let Some(repo_root) = git_output(repo, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+    else {
+        return;
+    };
     let Some(git_dir) = git_output(repo, &["rev-parse", "--absolute-git-dir"]).map(PathBuf::from)
     else {
         return;
     };
+    let common_git_dir = git_output(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map_or_else(|| git_dir.clone(), PathBuf::from);
 
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
     println!(
         "cargo:rerun-if-changed={}",
-        git_dir.join("packed-refs").display()
+        common_git_dir.join("packed-refs").display()
     );
 
     if let Some(head_ref) = git_output(repo, &["symbolic-ref", "-q", "HEAD"]) {
         println!(
             "cargo:rerun-if-changed={}",
-            git_dir.join(head_ref).display()
+            common_git_dir.join(head_ref).display()
         );
+    }
+
+    if let Some(tracked_files) = git_output(&repo_root, &["ls-files", "-z"]) {
+        for tracked_file in tracked_files.split('\0').filter(|path| !path.is_empty()) {
+            println!(
+                "cargo:rerun-if-changed={}",
+                repo_root.join(tracked_file).display()
+            );
+        }
     }
 }
 

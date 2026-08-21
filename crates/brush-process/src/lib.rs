@@ -9,6 +9,12 @@ mod training_metrics;
 
 pub use brush_vfs::DataSource;
 
+/// Git-derived identifier for the source used to build Brush.
+pub const BUILD_ID: &str = env!("BRUSH_BUILD_ID");
+
+/// Package version with the Git-derived build identifier.
+pub const VERSION: &str = env!("BRUSH_VERSION");
+
 use burn_wgpu::{
     AutoCompiler, RuntimeOptions, WgpuDevice,
     graphics::{AutoGraphicsApi, GraphicsApi},
