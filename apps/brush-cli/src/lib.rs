@@ -23,7 +23,7 @@ use tracing::trace_span;
 #[derive(Parser)]
 #[command(
     author,
-    version = env!("BRUSH_VERSION"),
+    version = brush_process::VERSION,
     arg_required_else_help = false,
     about = "Brush - universal splats"
 )]
@@ -586,6 +586,6 @@ mod tests {
         let version = command.get_version().expect("version is configured");
 
         assert!(version.contains(env!("CARGO_PKG_VERSION")));
-        assert!(version.contains(env!("BRUSH_BUILD_ID")));
+        assert!(version.contains(brush_process::BUILD_ID));
     }
 }
