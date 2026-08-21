@@ -4,6 +4,9 @@ pub mod message;
 pub mod slot;
 pub mod train_stream;
 
+#[cfg(not(target_family = "wasm"))]
+mod training_metrics;
+
 pub use brush_vfs::DataSource;
 
 use burn_wgpu::{

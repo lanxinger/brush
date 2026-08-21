@@ -262,9 +262,17 @@ pub(crate) async fn train_stream(
     let mut current_lod: u32 = 0;
 
     let process_config = &train_stream_config.process_config;
+    let total_iters = train_stream_config.train_config.total_iters();
+
+    #[cfg(not(target_family = "wasm"))]
+    let mut training_metrics = crate::training_metrics::TrainingMetrics::from_env(
+        &dataset_name,
+        process_config.start_iter,
+        total_iters,
+    );
 
     log::info!("Start training loop.");
-    for iter in process_config.start_iter..train_stream_config.train_config.total_iters() {
+    for iter in process_config.start_iter..total_iters {
         let target_lod = if lod_levels == 0 || iter < training_steps {
             0u32
         } else {
@@ -423,10 +431,40 @@ pub(crate) async fn train_stream(
 
         // We just finished iter 'iter', now starting iter + 1.
         let iter = iter + 1;
-        let is_last_step = iter == train_stream_config.train_config.total_iters();
+        let is_last_step = iter == total_iters;
 
         let step_dur = step_time.elapsed();
         train_duration += step_dur;
+
+        #[cfg(not(target_family = "wasm"))]
+        let should_record_metrics = training_metrics
+            .as_ref()
+            .is_some_and(|metrics| metrics.should_record(iter, is_last_step));
+        #[cfg(not(target_family = "wasm"))]
+        if should_record_metrics {
+            let loss = stats.loss.clone().into_scalar_async::<f32>().await;
+            match loss {
+                Ok(loss) => {
+                    if let Some(metrics) = training_metrics.as_mut() {
+                        let write_result = metrics.record_step(
+                            iter,
+                            loss,
+                            refine.total_splats,
+                            step_dur.as_secs_f64() * 1000.0,
+                            train_duration.as_secs_f64() * 1000.0,
+                            is_last_step,
+                        );
+                        if let Err(error) = write_result {
+                            log::warn!("Disabling BRUSH_METRICS_LOG after write failure: {error}");
+                            training_metrics = None;
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::warn!("Could not read loss for BRUSH_METRICS_LOG: {error}");
+                }
+            }
+        }
 
         // Do evals. We skip this for LODs as it'd be confusing for rerun, but, could
         // revisit this.
@@ -728,6 +766,10 @@ async fn run_eval(
     let mut psnr = 0.0;
     let mut ssim = 0.0;
     let mut count = 0;
+    let mut masked_psnr = 0.0;
+    let mut masked_ssim = 0.0;
+    let mut mask_coverage = 0.0;
+    let mut masked_count = 0;
     log::info!("Running evaluation for iteration {iter}");
 
     for (i, view) in eval_scene.views.iter().enumerate() {
@@ -756,6 +798,17 @@ async fn run_eval(
         count += 1;
         psnr += sample.psnr.clone().into_scalar_async::<f32>().await?;
         ssim += sample.ssim.clone().into_scalar_async::<f32>().await?;
+        if let Some(masked) = &sample.masked {
+            masked_count += 1;
+            masked_psnr += masked.psnr.clone().into_scalar_async::<f32>().await?;
+            masked_ssim += masked.ssim.clone().into_scalar_async::<f32>().await?;
+            mask_coverage += sample.mask_coverage.unwrap_or(0.0);
+        } else if sample.mask_coverage == Some(0.0) {
+            log::warn!(
+                "Skipping masked evaluation metrics for {} because its alpha mask is empty",
+                view.image.img_name()
+            );
+        }
 
         #[cfg(not(target_family = "wasm"))]
         if let Some(path) = &save_path {
@@ -775,12 +828,22 @@ async fn run_eval(
     }
     psnr /= count as f32;
     ssim /= count as f32;
-    visualize.log_eval_stats(iter, psnr, ssim)?;
+    let masked = (masked_count > 0).then(|| {
+        (
+            masked_psnr / masked_count as f32,
+            masked_ssim / masked_count as f32,
+            mask_coverage / masked_count as f32,
+        )
+    });
+    visualize.log_eval_stats(iter, psnr, ssim, masked)?;
     emitter
         .emit(ProcessMessage::TrainMessage(TrainMessage::EvalResult {
             iter,
             avg_psnr: psnr,
             avg_ssim: ssim,
+            avg_masked_psnr: masked.map(|metrics| metrics.0),
+            avg_masked_ssim: masked.map(|metrics| metrics.1),
+            mean_mask_coverage: masked.map(|metrics| metrics.2),
         }))
         .await;
 

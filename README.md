@@ -53,6 +53,11 @@ Brush also can load .zip of splat files to display them as an animation, or a sp
 ## CLI
 Brush can be used as a CLI. Run `brush --help` to get an overview. Every CLI command can work with `--with-viewer` which also opens the UI, for easy debugging.
 
+For lightweight machine-readable training telemetry, set `BRUSH_METRICS_LOG`
+to a JSONL output path. Brush replaces that file for each run and writes a run
+header plus the first, final, and every 50th training step. Override the cadence
+with a positive `BRUSH_METRICS_EVERY` value.
+
 ## Rerun
 
 https://github.com/user-attachments/assets/f679fec0-935d-4dd2-87e1-c301db9cdc2c
@@ -285,7 +290,12 @@ cargo run --release -p brush-bench-test --bin brush-eval-checkpoint --features n
 ```
 
 The evaluator emits one `BRUSH_EVAL_VIEW` JSON record per held-out view and one
-aggregate `BRUSH_EVAL_RESULT` record. See the
+aggregate `BRUSH_EVAL_RESULT` record. Existing `psnr` and `ssim` fields remain
+full-frame metrics. When `--alpha-mode masked` is used with alpha-bearing
+images, the records also include mask-normalized metrics and coverage; empty
+masks are reported and excluded from masked aggregates. Masked SSIM weights
+window centres by alpha, so RGB outside the mask can still influence windows
+that cross the boundary. See the
 [egg 15k upstream-versus-macOS-preset bake-off](docs/performance/egg-15k-upstream-vs-macos-preset.md)
 for the frozen performance and quality baseline used by raster redesign work.
 
