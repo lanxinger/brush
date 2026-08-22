@@ -184,7 +184,7 @@ mod tests {
         // The selected raw scales are still exactly 1.0. Only the new floor is
         // applied; the old 0.2/0.3 values must not be baked underneath it.
         let expected = [(1.0 + 0.4f32.powi(2)).sqrt(), (1.0 + 0.5f32.powi(2)).sqrt()];
-        for (row, expected) in scales.chunks_exact(3).zip(expected) {
+        for (row, expected) in scales.as_chunks::<3>().0.iter().zip(expected) {
             for actual in row {
                 assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
             }

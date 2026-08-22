@@ -53,7 +53,7 @@ fn rasterize_reference(
             let mut transmittance = 1.0f32;
             let mut rgb = Vec3::ZERO;
 
-            for splat in projected.chunks_exact(PROJECTED_LANES) {
+            for splat in projected.as_chunks::<PROJECTED_LANES>().0 {
                 let dx = pixel_x - splat[0];
                 let dy = pixel_y - splat[1];
                 let sigma = 0.5 * (splat[2] * dx * dx + splat[4] * dy * dy) + splat[3] * dx * dy;
