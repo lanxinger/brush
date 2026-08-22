@@ -47,6 +47,7 @@ fn resolve_option(
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 const fn preset_enabled_by_default() -> bool {
     cfg!(all(
         feature = "native-msl",
