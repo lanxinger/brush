@@ -28,22 +28,45 @@ fn value_enabled(value: &OsStr) -> bool {
 }
 
 #[cfg(test)]
-fn resolve_option(option: Option<&str>, preset: Option<&str>) -> bool {
+fn resolve_preset(preset: Option<&str>, default_enabled: bool) -> bool {
+    match preset {
+        Some(value) => parse_bool(value).unwrap_or(false),
+        None => default_enabled,
+    }
+}
+
+#[cfg(test)]
+fn resolve_option(
+    option: Option<&str>,
+    preset: Option<&str>,
+    default_preset_enabled: bool,
+) -> bool {
     match option {
         Some(value) => parse_bool(value).unwrap_or(false),
-        None => preset.and_then(parse_bool).unwrap_or(false),
+        None => resolve_preset(preset, default_preset_enabled),
     }
+}
+
+const fn preset_enabled_by_default() -> bool {
+    cfg!(all(
+        feature = "native-msl",
+        target_os = "macos",
+        target_arch = "aarch64",
+        not(target_family = "wasm")
+    ))
 }
 
 /// Whether the process requested the complete native-MSL optimization preset.
 ///
-/// This reports the environment request only. Compile-time and device capability
+/// Apple Silicon native-MSL builds default the preset on. An explicit
+/// environment value overrides that default. Compile-time and device capability
 /// gates still decide whether an individual optimization can run.
 #[cfg(not(target_family = "wasm"))]
 pub fn preset_requested() -> bool {
-    std::env::var_os(PRESET_ENV)
-        .as_deref()
-        .is_some_and(value_enabled)
+    match std::env::var_os(PRESET_ENV) {
+        Some(value) => value_enabled(&value),
+        None => preset_enabled_by_default(),
+    }
 }
 
 #[cfg(target_family = "wasm")]
@@ -96,7 +119,7 @@ pub const fn fine_raster_tiles_requested() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bool, resolve_option};
+    use super::{parse_bool, resolve_option, resolve_preset};
 
     #[test]
     fn parser_accepts_only_documented_values() {
@@ -112,32 +135,47 @@ mod tests {
     }
 
     #[test]
-    fn options_are_disabled_by_default() {
-        assert!(!resolve_option(None, None));
-        assert!(!resolve_option(None, Some("0")));
-        assert!(!resolve_option(None, Some("false")));
-        assert!(!resolve_option(None, Some("invalid")));
+    fn options_are_disabled_with_portable_default() {
+        assert!(!resolve_option(None, None, false));
+        assert!(!resolve_option(None, Some("0"), false));
+        assert!(!resolve_option(None, Some("false"), false));
+        assert!(!resolve_option(None, Some("invalid"), false));
     }
 
     #[test]
     fn absent_option_inherits_enabled_preset() {
-        assert!(resolve_option(None, Some("1")));
-        assert!(resolve_option(None, Some("TRUE")));
+        assert!(resolve_option(None, Some("1"), false));
+        assert!(resolve_option(None, Some("TRUE"), false));
+    }
+
+    #[test]
+    fn absent_preset_uses_platform_default() {
+        assert!(resolve_preset(None, true));
+        assert!(!resolve_preset(None, false));
+    }
+
+    #[test]
+    fn explicit_preset_overrides_platform_default() {
+        assert!(!resolve_preset(Some("0"), true));
+        assert!(!resolve_preset(Some("false"), true));
+        assert!(resolve_preset(Some("1"), false));
+        assert!(resolve_preset(Some("TRUE"), false));
+        assert!(!resolve_preset(Some("invalid"), true));
     }
 
     #[test]
     fn explicit_option_overrides_preset() {
-        assert!(resolve_option(Some("1"), Some("0")));
-        assert!(resolve_option(Some("true"), None));
-        assert!(!resolve_option(Some("0"), Some("1")));
-        assert!(!resolve_option(Some("FALSE"), Some("true")));
+        assert!(resolve_option(Some("1"), Some("0"), false));
+        assert!(resolve_option(Some("true"), None, false));
+        assert!(!resolve_option(Some("0"), Some("1"), false));
+        assert!(!resolve_option(Some("FALSE"), Some("true"), false));
     }
 
     #[test]
     fn invalid_explicit_option_fails_closed() {
-        assert!(!resolve_option(Some(""), Some("1")));
-        assert!(!resolve_option(Some("invalid"), Some("1")));
-        assert!(!resolve_option(Some(" true "), Some("1")));
+        assert!(!resolve_option(Some(""), Some("1"), true));
+        assert!(!resolve_option(Some("invalid"), Some("1"), true));
+        assert!(!resolve_option(Some(" true "), Some("1"), true));
     }
 
     #[cfg(unix)]

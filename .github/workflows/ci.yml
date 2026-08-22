@@ -78,8 +78,8 @@ jobs:
       # The browser build (brush-app / brush-js cdylibs) is only compiled for
       # wasm32; the host-only jobs above never exercise it. Check it here so a
       # wasm-only break can't ship green.
-      - name: check wasm32 (browser crates)
-        run: cargo check --locked -p brush-app -p brush-js --lib --target wasm32-unknown-unknown
+      - name: check wasm32 (portable browser crates)
+        run: cargo check --locked -p brush-app -p brush-js --lib --target wasm32-unknown-unknown --no-default-features
 
       - name: check wasm32 (native MSL feature falls back to WGSL)
         run: cargo check --locked -p brush-app --lib --target wasm32-unknown-unknown --features native-msl
@@ -113,6 +113,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -121,9 +122,13 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
 
-      # Native MSL remains opt-in. GitHub's paravirtual Apple GPU can fall
-      # back to WGSL after the Metal feature selects u8 bool storage, which
-      # is not a valid WGSL configuration. Physical-device MSL coverage is a
-      # separate release gate; CI exercises the portable WGSL path here.
-      - name: Run tests
-        run: cargo test --locked --workspace --features brush-app/debug-validation
+      # Release artifacts use brush-app's default native-MSL feature. Hosted
+      # runners can compile that Apple Silicon binary, but their paravirtual
+      # GPU cannot provide reliable native-MSL runtime coverage.
+      - name: Check Apple Silicon release defaults
+        run: cargo check --locked --release -p brush-app --bin brush --target aarch64-apple-darwin
+
+      # Exercise the portable WGSL runtime on hosted CI. Physical-device MSL
+      # coverage remains a separate release gate.
+      - name: Run portable WGSL tests
+        run: cargo test --locked --workspace --no-default-features --features brush-app/debug-validation

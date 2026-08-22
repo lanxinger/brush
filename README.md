@@ -70,21 +70,34 @@ First install rust 1.88+. You can run tests with `cargo test --all`. Brush uses 
 ### Windows/macOS/Linux
 Use `cargo run --release` from the workspace root to make an optimized build. Use `cargo run` to run a debug build.
 
-On macOS, native Metal Shading Language code generation is opt-in. WGSL remains the default:
+On Apple Silicon macOS, the desktop `brush` app compiles native Metal Shading
+Language code generation by default. Build and run it normally:
 
 ```sh
-cargo run --release --features native-msl
+cargo build --release
+./target/release/brush
 ```
 
-The same feature is available on `brush-cli` and `brush-c`. On non-Metal backends it continues to use WGSL. The compiler choice applies to the whole binary, so compare WGSL and MSL with separate builds.
-
-On Apple Silicon, one runtime preset requests all six retained native-MSL
-training optimizations. Compile native MSL into the binary once, then enable
-the preset when launching it:
+The native-MSL optimization preset is also enabled by default for that build,
+so no launch environment is required. To build the portable WGSL desktop app
+for CI, a virtualized Mac, or unsupported hardware, disable default features:
 
 ```sh
-cargo build --release --features native-msl
-BRUSH_NATIVE_MSL_PRESET=1 ./target/release/brush
+cargo build --release --no-default-features
+./target/release/brush
+```
+
+`brush-cli` and `brush-c` retain explicit host-controlled compiler selection;
+build them with `--features native-msl` when appropriate. On non-Metal backends
+the feature continues to use WGSL. The compiler choice applies to the whole
+binary, so compare WGSL and MSL with separate builds.
+
+The runtime preset requests all six retained native-MSL training optimizations.
+An explicit environment value still overrides the Apple Silicon default. For
+example, this keeps native MSL code generation but disables the preset:
+
+```sh
+BRUSH_NATIVE_MSL_PRESET=0 ./target/release/brush
 ```
 
 The preset is equivalent to setting these individual options to `1`:
@@ -108,9 +121,9 @@ BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS=0 \
 ```
 
 Only `1` and case-insensitive `true` enable a switch. `0`, case-insensitive
-`false`, or an unrecognized explicit value disable it. The preset and all
-individual options are off by default, and have no effect unless the required
-native-MSL build and platform gates are present.
+`false`, or an unrecognized explicit value disable it. The preset defaults on
+only for Apple Silicon macOS native-MSL builds; elsewhere it remains off. All
+options remain subject to their required compile-time and platform gates.
 
 The preset selects the 16x8 training rasterizer on Apple Silicon native-MSL
 builds. It replaces the 16x16 tile geometry for the forward, map, raster, and
@@ -119,7 +132,7 @@ to use 16x16 tiles. The standalone option remains available without the rest
 of the preset:
 
 ```sh
-BRUSH_NATIVE_MSL_FINE_RASTER_TILES=1 cargo run --release --features native-msl
+BRUSH_NATIVE_MSL_FINE_RASTER_TILES=1 cargo run --release
 ```
 
 Fine tiles alone retain bounds checks in raster backward; the full preset also
@@ -141,7 +154,7 @@ gates are recorded in the
 Native-MSL builds also expose an experimental, off-by-default raster-backward path without generated buffer bounds checks. It relies on the renderer's tile/range invariants and requires native float atomics (otherwise it falls back to the checked path), so use it for controlled benchmarking and soaks rather than production builds:
 
 ```sh
-BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD=1 cargo run --release --features native-msl
+BRUSH_NATIVE_MSL_UNCHECKED_RASTER_BWD=1 cargo run --release
 ```
 
 An experimental fused update for the spherical-harmonic Adam state is also
@@ -150,7 +163,7 @@ per-coefficient learning-rate scaling and reduced second-moment state, and
 falls back to the generic optimizer for unsupported tensor shapes or devices:
 
 ```sh
-BRUSH_NATIVE_MSL_FUSED_SH_ADAM=1 cargo run --release --features native-msl
+BRUSH_NATIVE_MSL_FUSED_SH_ADAM=1 cargo run --release
 ```
 
 An experimental Apple Silicon native-MSL path can also coalesce dense
@@ -161,7 +174,7 @@ to the existing path when the required 32-lane SIMD-group support is
 unavailable:
 
 ```sh
-BRUSH_NATIVE_MSL_COALESCED_SH_GRAD=1 cargo run --release --features native-msl
+BRUSH_NATIVE_MSL_COALESCED_SH_GRAD=1 cargo run --release
 ```
 
 The steady-state Apple Silicon path can instead keep spherical-harmonic
@@ -174,7 +187,7 @@ gradient materialization), while both dense options remain available on later
 sparse fallback steps:
 
 ```sh
-BRUSH_NATIVE_MSL_SPARSE_SH_ADAM=1 cargo run --release --features native-msl
+BRUSH_NATIVE_MSL_SPARSE_SH_ADAM=1 cargo run --release
 ```
 
 Tracked SSIM training can optionally save the three f32 SSIM partials from
@@ -188,7 +201,7 @@ explicitly under the preset on memory-constrained systems. Its standalone
 opt-in remains:
 
 ```sh
-BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS=1 cargo run --release --features native-msl
+BRUSH_NATIVE_MSL_SAVED_LOSS_PARTIALS=1 cargo run --release
 ```
 
 ### Web
