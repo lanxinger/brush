@@ -1056,6 +1056,7 @@ name = "brush-c"
 version = "1.0.0"
 dependencies = [
  "brush-process",
+ "brush-render",
  "tempfile",
  "tokio",
  "tokio-stream",
