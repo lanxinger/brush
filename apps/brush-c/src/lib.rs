@@ -172,10 +172,7 @@ fn run_training(
                             progress_callback(progress_message, user_data);
                         }
                     }
-                    Err(error) => {
-                        eprintln!("brush-c: process stream error: {error:#}");
-                        return TrainExitCode::Error;
-                    }
+                    Err(_) => return TrainExitCode::Error,
                 }
             }
 
@@ -268,12 +265,8 @@ pub unsafe extern "C" fn train_and_save_v2(
         // SAFETY: The pointer was checked for null and the caller guarantees a valid struct.
         let train_options = unsafe { *options };
         // SAFETY: Caller guarantees output_path is a valid C string when non-null.
-        let process_args = match unsafe { train_options.into_train_stream_config() } {
-            Ok(process_args) => process_args,
-            Err(error) => {
-                eprintln!("brush-c: invalid v2 options: {error}");
-                return TrainExitCode::Error;
-            }
+        let Ok(process_args) = (unsafe { train_options.into_train_stream_config() }) else {
+            return TrainExitCode::Error;
         };
         run_training(dataset_path, process_args, progress_callback, user_data)
     }));
