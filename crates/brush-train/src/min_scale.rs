@@ -229,7 +229,9 @@ mod tests {
             .expect("means readback")
             .try_to_vec::<f32>()
             .expect("f32 means")
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|xyz| {
                 cameras
                     .iter()

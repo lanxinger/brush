@@ -129,7 +129,9 @@ pub fn create_random_splats(
 
 pub fn bounds_from_pos(percentile: f32, means: &[f32]) -> BoundingBox {
     let (mut x_vals, mut y_vals, mut z_vals): (Vec<f32>, Vec<f32>, Vec<f32>) = means
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|chunk| (chunk[0], chunk[1], chunk[2]))
         .collect();
     x_vals.retain(|x| x.is_finite());
@@ -246,7 +248,9 @@ mod tests {
 
     fn bounds_from_pos_sorted_reference(percentile: f32, means: &[f32]) -> BoundingBox {
         let (mut x_vals, mut y_vals, mut z_vals): (Vec<f32>, Vec<f32>, Vec<f32>) = means
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|chunk| (chunk[0], chunk[1], chunk[2]))
             .collect();
         x_vals.retain(|x| x.is_finite());
