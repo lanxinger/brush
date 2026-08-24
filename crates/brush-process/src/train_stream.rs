@@ -642,6 +642,26 @@ async fn mip_view_cameras(scene: &Scene) -> Vec<(glam::Vec3, f32)> {
     cameras
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn eval_output_path(base: &Path, iter: u32, image_path: &Path) -> anyhow::Result<PathBuf> {
+    let mut relative = PathBuf::new();
+    for component in image_path.components() {
+        match component {
+            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::CurDir => {}
+            _ => anyhow::bail!(
+                "Eval image path must be relative and cannot traverse directories: {}",
+                image_path.display()
+            ),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        anyhow::bail!("Eval image path is empty");
+    }
+    relative.set_extension("png");
+    Ok(base.join(format!("eval_{iter}")).join(relative))
+}
+
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
@@ -677,6 +697,28 @@ mod tests {
         assert_eq!(cameras.len(), 1);
         assert_eq!(cameras[0].0, camera.position);
         assert!((cameras[0].1 - camera.focal(glam::uvec2(16, 13)).x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn eval_paths_preserve_directories_and_avoid_flattening_collisions() {
+        let base = Path::new("output");
+        let first = eval_output_path(base, 42, Path::new("images/a/frame.jpg")).unwrap();
+        let second = eval_output_path(base, 42, Path::new("images/b/frame.jpg")).unwrap();
+        assert_eq!(first, Path::new("output/eval_42/images/a/frame.png"));
+        assert_eq!(second, Path::new("output/eval_42/images/b/frame.png"));
+        assert_ne!(first, second);
+
+        let dash_left = eval_output_path(base, 42, Path::new("a-b/frame.jpg")).unwrap();
+        let dash_right = eval_output_path(base, 42, Path::new("a/b-frame.jpg")).unwrap();
+        assert_ne!(dash_left, dash_right);
+    }
+
+    #[test]
+    fn eval_paths_reject_absolute_and_traversing_inputs() {
+        let base = Path::new("output");
+        assert!(eval_output_path(base, 1, Path::new("../frame.jpg")).is_err());
+        assert!(eval_output_path(base, 1, Path::new("/tmp/frame.jpg")).is_err());
+        assert!(eval_output_path(base, 1, Path::new(".")).is_err());
     }
 }
 
@@ -812,10 +854,15 @@ async fn run_eval(
 
         #[cfg(not(target_family = "wasm"))]
         if let Some(path) = &save_path {
-            let img_name = view.image.img_name();
-            let path = path
-                .join(format!("eval_{iter}"))
-                .join(format!("{img_name}.png"));
+            let path = eval_output_path(path, iter, view.image.path())?;
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await.with_context(|| {
+                    format!(
+                        "Failed to create eval output directory {}",
+                        parent.display()
+                    )
+                })?;
+            }
             sample.save_to_disk(&path).await?;
         }
 

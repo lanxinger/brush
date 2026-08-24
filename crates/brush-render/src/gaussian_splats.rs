@@ -128,17 +128,16 @@ pub fn fold_min_scale(
     let f = crate::burn_glue::match_backend(f, &transforms);
     let n = transforms.dims()[0] as i32;
     let log_scales = transforms.clone().slice(s![.., 7..10]); // [N,3]
-    let s2 = log_scales.mul_scalar(2.0).exp(); // s² = exp(2·log) [N,3]
+    let s2 = log_scales.clone().mul_scalar(2.0).exp(); // s² = exp(2·log) [N,3]
     let f2 = f.clone().mul(f).reshape([n, 1]); // [N,1]
-    let s2f = s2.clone().add(f2); // s² + f² [N,3]
+    let s2f = s2.add(f2); // s² + f² [N,3]
 
-    let new_log = s2f.clone().log().mul_scalar(0.5); // log(sqrt(s²+f²)) [N,3]
-    let transforms = transforms.slice_assign(s![.., 7..10], new_log);
+    let new_log = s2f.log().mul_scalar(0.5); // log(sqrt(s²+f²)) [N,3]
+    let transforms = transforms.slice_assign(s![.., 7..10], new_log.clone());
 
-    let det = |t: Tensor<2>| {
-        t.clone().slice(s![.., 0..1]) * t.clone().slice(s![.., 1..2]) * t.slice(s![.., 2..3])
-    };
-    let coef = (det(s2).div(det(s2f))).sqrt().reshape([n]); // sqrt(det1/det2) [N]
+    // Compute the determinant ratio in log space. Multiplying three tiny
+    // squared scales first can underflow even when the ratio itself is normal.
+    let coef = log_scales.sub(new_log).sum_dim(1).exp().reshape([n]);
     let opac = sigmoid(raw_opac).mul(coef).clamp(1e-6, 1.0 - 1e-6);
     let raw_opac = opac.clone().div(opac.neg().add_scalar(1.0)).log(); // logit
 
@@ -502,4 +501,76 @@ pub async fn render_splats_with_rasterizer(
     };
 
     (Tensor::from_dispatch(output.out_img), aux)
+}
+
+#[cfg(test)]
+mod min_scale_fold_tests {
+    use super::*;
+
+    fn test_inputs(device: &Device) -> (Tensor<2>, Tensor<1>, Tensor<1>, Vec<f32>) {
+        let log_scales = vec![-14.0_f32, -15.0, -16.0, -18.0, -20.0];
+        let mut transforms = vec![0.0; log_scales.len() * 10];
+        for (row, log_scale) in log_scales.iter().enumerate() {
+            transforms[row * 10 + 7..row * 10 + 10].fill(*log_scale);
+        }
+        let floors = log_scales.iter().map(|value| value.exp()).collect();
+        let n = log_scales.len();
+        (
+            Tensor::from_data(TensorData::new(transforms, [n, 10]), device).require_grad(),
+            Tensor::zeros([n], device),
+            Tensor::from_data(TensorData::new(floors, [n]), device),
+            log_scales,
+        )
+    }
+
+    #[tokio::test]
+    async fn fold_min_scale_keeps_subnormal_scale_gradients_finite() {
+        let device = Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+        let (transforms, raw_opacities, floors, log_scales) = test_inputs(&device);
+        let source = transforms.clone();
+        let (_, folded_raw_opacities) = fold_min_scale(transforms, raw_opacities, floors);
+        let grads = folded_raw_opacities.sum().backward();
+        let gradient = source
+            .grad(&grads)
+            .expect("transform gradient")
+            .into_data_async()
+            .await
+            .expect("gradient readback")
+            .try_to_vec::<f32>()
+            .expect("f32 gradient");
+
+        let coefficient = 0.5_f64.sqrt().powi(3);
+        let folded_opacity = 0.5 * coefficient;
+        let expected = 0.5 / (1.0 - folded_opacity);
+        for (row, log_scale) in log_scales.iter().enumerate() {
+            for axis in 7..10 {
+                let actual = f64::from(gradient[row * 10 + axis]);
+                assert!(
+                    actual.is_finite() && (actual - expected).abs() < 2e-4,
+                    "unexpected gradient {actual} for log scale {log_scale}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fold_min_scale_preserves_closed_form_opacity_compensation() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let (transforms, raw_opacities, floors, log_scales) = test_inputs(&device);
+        let (_, folded_raw_opacities) = fold_min_scale(transforms, raw_opacities, floors);
+        let opacities = sigmoid(folded_raw_opacities)
+            .into_data_async()
+            .await
+            .expect("opacity readback")
+            .try_to_vec::<f32>()
+            .expect("f32 opacity");
+
+        let expected = 0.5 * 0.5_f32.sqrt().powi(3);
+        for (actual, log_scale) in opacities.iter().zip(log_scales) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "unexpected opacity {actual} for log scale {log_scale}"
+            );
+        }
+    }
 }
