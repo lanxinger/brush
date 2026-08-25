@@ -95,7 +95,7 @@ fn launch_fwd<R: CubeRuntime>(
     camera_idx: usize,
     payload: GridPayload,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::{CubeCount, CubeDim};
+    use burn_cubecl::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let vignetting = contiguous(vignetting);
@@ -109,7 +109,7 @@ fn launch_fwd<R: CubeRuntime>(
     let client = rgb.client.clone();
     kernels::ppisp_grid_fwd_kernel::launch::<R>(
         &client,
-        CubeCount::Static((h * w).div_ceil(kernels::BLOCK_SIZE), 1, 1),
+        brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE),
         CubeDim::new_1d(kernels::BLOCK_SIZE),
         grids.into_tensor_arg(),
         vignetting.into_tensor_arg(),
@@ -142,7 +142,7 @@ fn launch_bwd<R: CubeRuntime>(
     payload: GridPayload,
     subsample: GradSubsample,
 ) -> (CubeTensor<R>, CubeTensor<R>, CubeTensor<R>) {
-    use burn_cubecl::cubecl::prelude::{CubeCount, CubeDim};
+    use burn_cubecl::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let vignetting = contiguous(vignetting);
@@ -164,7 +164,9 @@ fn launch_bwd<R: CubeRuntime>(
     );
     let client = rgb.client.clone();
 
-    let cube_count = CubeCount::Static(num_cubes, 1, 1);
+    // Keep one partial row per logical cube; the kernel guards any padded
+    // workgroups introduced by the 2D dispatch.
+    let cube_count = brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE);
     let cube_dim = CubeDim::new_1d(kernels::BLOCK_SIZE);
     let grid_offset = view_idx as u32 * gc * gl * gh * gw;
 

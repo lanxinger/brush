@@ -90,7 +90,7 @@ pub fn ppisp_grid_fwd_kernel(
     #[comptime] with_color: bool,
     #[comptime] with_crf: bool,
 ) {
-    let idx = CUBE_POS_X * BLOCK_SIZE + UNIT_POS_X;
+    let idx = (CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X) * BLOCK_SIZE + UNIT_POS_X;
     if idx >= img_h * img_w {
         terminate!();
     }
@@ -230,7 +230,8 @@ pub fn ppisp_grid_fwd_kernel(
     clippy::too_many_arguments,
     clippy::needless_pass_by_ref_mut,
     clippy::fn_params_excessive_bools,
-    clippy::manual_range_contains
+    clippy::manual_range_contains,
+    clippy::manual_div_ceil
 )]
 pub fn ppisp_grid_bwd_kernel<A: AtomicAddF32>(
     grid: &Tensor<f32>,
@@ -255,7 +256,9 @@ pub fn ppisp_grid_bwd_kernel<A: AtomicAddF32>(
     #[comptime] with_color: bool,
     #[comptime] with_crf: bool,
 ) {
-    let idx = CUBE_POS_X * BLOCK_SIZE + UNIT_POS_X;
+    // Flatten the possibly 2D-tiled dispatch back to the original pixel order.
+    let cube_flat = CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X;
+    let idx = cube_flat * BLOCK_SIZE + UNIT_POS_X;
 
     let mut vg = Array::<f32>::new(NUM_VIG_GRADS as usize);
     #[unroll]
@@ -566,7 +569,10 @@ pub fn ppisp_grid_bwd_kernel<A: AtomicAddF32>(
             }
         }
         sync_cube();
-        if UNIT_POS_X < NUM_VIG_GRADS {
+        // The 2D launch can contain padded workgroups, while the partials
+        // buffer still has exactly one row per logical cube.
+        let num_cubes = (img_h * img_w + BLOCK_SIZE - 1u32) / BLOCK_SIZE;
+        if UNIT_POS_X < NUM_VIG_GRADS && cube_flat < num_cubes {
             let num_subgroups = BLOCK_SIZE / PLANE_DIM;
             let mut tot = 0.0f32;
             let mut i = 0u32;
@@ -574,7 +580,7 @@ pub fn ppisp_grid_bwd_kernel<A: AtomicAddF32>(
                 tot += sg_partials[(i * NUM_VIG_GRADS + UNIT_POS_X) as usize];
                 i += 1u32;
             }
-            vig_partials[(CUBE_POS_X * NUM_VIG_GRADS + UNIT_POS_X) as usize] = tot;
+            vig_partials[(cube_flat * NUM_VIG_GRADS + UNIT_POS_X) as usize] = tot;
         }
     }
 }
