@@ -41,7 +41,6 @@ burn-ir.workspace = true
 burn-wgpu.workspace = true
 
 [dev-dependencies]
-brush-cube = { path = "../brush-cube" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 wasm-bindgen-test = "0.3"
 

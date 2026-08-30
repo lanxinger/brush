@@ -1,3 +1,4 @@
+use burn_cubecl::CubeRuntime;
 mod kernels;
 
 use brush_cube::calc_cube_count_1d;
@@ -5,10 +6,9 @@ use brush_cube::create_tensor;
 use burn::backend::TensorMetadata;
 use burn_cubecl::cubecl::CubeDim;
 use burn_wgpu::CubeTensor;
-use burn_wgpu::WgpuRuntime;
 use kernels::THREADS_PER_GROUP;
 
-pub fn prefix_sum(input: CubeTensor<WgpuRuntime>) -> CubeTensor<WgpuRuntime> {
+pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
     assert!(input.is_contiguous(), "Please ensure input is contiguous");
 
     let num = input.shape()[0];
@@ -21,7 +21,7 @@ pub fn prefix_sum(input: CubeTensor<WgpuRuntime>) -> CubeTensor<WgpuRuntime> {
 
     let cube_dim = CubeDim::new_1d(THREADS_PER_GROUP as u32);
 
-    kernels::prefix_sum_scan_kernel::launch::<WgpuRuntime>(
+    kernels::prefix_sum_scan_kernel::launch::<R>(
         &client,
         calc_cube_count_1d(num as u32, THREADS_PER_GROUP as u32),
         cube_dim,
@@ -42,7 +42,7 @@ pub fn prefix_sum(input: CubeTensor<WgpuRuntime>) -> CubeTensor<WgpuRuntime> {
         work_size.push(work_sz);
     }
 
-    kernels::prefix_sum_scan_sums_kernel::launch::<WgpuRuntime>(
+    kernels::prefix_sum_scan_sums_kernel::launch::<R>(
         &client,
         calc_cube_count_1d(work_size[0] as u32, THREADS_PER_GROUP as u32),
         cube_dim,
@@ -51,7 +51,7 @@ pub fn prefix_sum(input: CubeTensor<WgpuRuntime>) -> CubeTensor<WgpuRuntime> {
     );
 
     for l in 0..(group_buffer.len() - 1) {
-        kernels::prefix_sum_scan_sums_kernel::launch::<WgpuRuntime>(
+        kernels::prefix_sum_scan_sums_kernel::launch::<R>(
             &client,
             calc_cube_count_1d(work_size[l + 1] as u32, THREADS_PER_GROUP as u32),
             cube_dim,
@@ -63,7 +63,7 @@ pub fn prefix_sum(input: CubeTensor<WgpuRuntime>) -> CubeTensor<WgpuRuntime> {
     for l in (1..group_buffer.len()).rev() {
         let work_sz = work_size[l - 1];
 
-        kernels::prefix_sum_add_scanned_sums_kernel::launch::<WgpuRuntime>(
+        kernels::prefix_sum_add_scanned_sums_kernel::launch::<R>(
             &client,
             calc_cube_count_1d(work_sz as u32, THREADS_PER_GROUP as u32),
             cube_dim,
@@ -72,7 +72,7 @@ pub fn prefix_sum(input: CubeTensor<WgpuRuntime>) -> CubeTensor<WgpuRuntime> {
         );
     }
 
-    kernels::prefix_sum_add_scanned_sums_kernel::launch::<WgpuRuntime>(
+    kernels::prefix_sum_add_scanned_sums_kernel::launch::<R>(
         &client,
         calc_cube_count_1d(
             (work_size[0] * THREADS_PER_GROUP) as u32,
@@ -93,13 +93,14 @@ mod tests {
     use burn::backend::TensorMetadata;
     use burn::backend::ops::IntTensorOps;
     use burn::tensor::DType;
-    use burn_wgpu::{CubeTensor, WgpuRuntime};
+
+    use burn_wgpu::CubeTensor;
     use wasm_bindgen_test::wasm_bindgen_test;
 
     #[cfg(target_family = "wasm")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
-    async fn read_i32(tensor: CubeTensor<WgpuRuntime>) -> Vec<i32> {
+    async fn read_i32(tensor: CubeTensor<brush_cube::MainRuntime>) -> Vec<i32> {
         let data = MainBackendBase::int_into_data(tensor)
             .await
             .expect("readback");
@@ -137,7 +138,8 @@ mod tests {
     #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_empty() {
         let device = brush_cube::test_helpers::test_device().await;
-        let keys = create_tensor_from_slice::<i32>(&[], &device, DType::I32);
+        let keys =
+            create_tensor_from_slice::<i32, brush_cube::MainRuntime>(&[], &device, DType::I32);
         let summed = prefix_sum(keys);
         assert_eq!(summed.shape()[0], 0);
     }

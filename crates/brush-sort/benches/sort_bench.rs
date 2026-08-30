@@ -13,12 +13,12 @@
 use std::sync::Arc;
 
 use brush_cube::CubeTensor;
+use brush_cube::MainRuntime;
 use brush_sort::radix_argsort;
 use burn::backend::wgpu::WgpuDevice;
 use burn::tensor::{DType, Shape};
 use burn_cubecl::cubecl::Runtime;
 use burn_cubecl::cubecl::future::block_on;
-use burn_wgpu::{AutoCompiler, WgpuRuntime};
 
 #[cfg(not(target_family = "wasm"))]
 fn main() {
@@ -77,8 +77,8 @@ fn make_inputs(size: usize, key_kind: KeyKind) -> Arc<(Vec<u32>, Vec<u32>)> {
 
 // Build a CubeTensor directly from a raw u32 slice. Bypasses Burn's i32-typed
 // `from_ints` which would panic on values >= 2^31.
-fn upload_u32(device: &WgpuDevice, data: &[u32]) -> CubeTensor<WgpuRuntime> {
-    let client = WgpuRuntime::client(device);
+fn upload_u32(device: &WgpuDevice, data: &[u32]) -> CubeTensor<MainRuntime> {
+    let client = MainRuntime::client(device);
     let handle = client.create_from_slice(bytemuck::cast_slice(data));
     CubeTensor::new_contiguous(
         client,
@@ -91,13 +91,13 @@ fn upload_u32(device: &WgpuDevice, data: &[u32]) -> CubeTensor<WgpuRuntime> {
 
 fn run_sort(
     device: &WgpuDevice,
-    keys: CubeTensor<WgpuRuntime>,
-    values: CubeTensor<WgpuRuntime>,
+    keys: CubeTensor<MainRuntime>,
+    values: CubeTensor<MainRuntime>,
     bits: u32,
 ) {
     let (_sorted_keys, _sorted_values) = radix_argsort(keys, values, bits);
     // Synchronize without transferring the full result back to the CPU.
-    let client = WgpuRuntime::<AutoCompiler>::client(device);
+    let client = MainRuntime::client(device);
     block_on(client.sync()).expect("Failed to sync radix benchmark");
 }
 
