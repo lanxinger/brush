@@ -32,9 +32,12 @@ mod ppisp_kernels;
 mod ppisp_math;
 pub mod train_state;
 
-use brush_cube::{CubeRuntime, CubeTensor, FusionCubeRuntime, into_contiguous, zeros_client};
 use burn::backend::wgpu::WgpuRuntime;
 use burn::tensor::{DType, Shape};
+use burn_cubecl::{
+    CubeRuntime, fusion::FusionCubeRuntime, kernel::into_contiguous, ops::numeric::zeros_client,
+    tensor::CubeTensor,
+};
 use burn_fusion::{
     FusionHandle,
     stream::{Operation, StreamId},

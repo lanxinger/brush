@@ -248,11 +248,10 @@ impl AppPane for StatsPanel {
                 }
             }
 
-            ui.add_space(10.0);
-            ui.heading("GPU");
-            ui.separator();
-
             if let Some(memory) = self.memory_stats {
+                ui.add_space(10.0);
+                ui.heading("Compute GPU");
+                ui.separator();
                 stats_grid(ui, "memory_stats_grid", |ui, v| {
                     stat_row(ui, "Bytes in use", bytes_format(memory.bytes_in_use), v);
                     stat_row(ui, "Bytes reserved", bytes_format(memory.bytes_reserved), v);
@@ -269,6 +268,9 @@ impl AppPane for StatsPanel {
             if !cfg!(target_family = "wasm")
                 && let Some(adapter_info) = &self.adapter_info
             {
+                ui.add_space(10.0);
+                ui.heading("Viewer GPU");
+                ui.separator();
                 stats_grid(ui, "gpu_info_grid", |ui, v| {
                     stat_row(ui, "Name", &adapter_info.name, v);
                     stat_row(ui, "Type", format!("{:?}", adapter_info.device_type), v);

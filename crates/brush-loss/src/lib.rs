@@ -16,7 +16,6 @@
 //! trade memory for a faster backward pass.
 
 use brush_cube::MainBackend as Wgpu;
-use brush_cube::{CubeBackend, CubeRuntime, CubeTensor, FusionCubeRuntime, into_contiguous};
 use burn::backend::autodiff::checkpoint::strategy::CheckpointStrategy;
 use burn::backend::{Autodiff, AutodiffBackend};
 use burn::{
@@ -30,6 +29,10 @@ use burn::{
         tensor::{FloatTensor, IntTensor},
     },
     tensor::{DType, Int, Shape, Tensor},
+};
+use burn_cubecl::{
+    CubeBackend, CubeRuntime, fusion::FusionCubeRuntime, kernel::into_contiguous,
+    tensor::CubeTensor,
 };
 use burn_fusion::{
     Fusion, FusionHandle,
@@ -993,7 +996,7 @@ trait SavedLossOps: Backend {
 }
 
 fn alloc_zeros<R: CubeRuntime>(template: &CubeTensor<R>) -> CubeTensor<R> {
-    brush_cube::zeros_client::<R>(
+    burn_cubecl::ops::numeric::zeros_client::<R>(
         template.client.clone(),
         template.device.clone(),
         Shape::from(template.shape().as_slice().to_vec()),
@@ -1374,7 +1377,7 @@ fn launch_unpack_gt_rgb<R: CubeRuntime>(
     let bg = composite_bg.unwrap_or(Vec3::ZERO);
 
     let client = gt_packed.client.clone();
-    let out = brush_cube::zeros_client::<R>(
+    let out = burn_cubecl::ops::numeric::zeros_client::<R>(
         client.clone(),
         gt_packed.device.clone(),
         Shape::new([h as usize, w as usize, 3]),
@@ -1859,7 +1862,7 @@ mod tests {
             cfg,
             Some(kernels::BWD_TILE_SMALL),
         );
-        let small: Vec<f32> = brush_cube::into_data_sync(small)
+        let small: Vec<f32> = burn_cubecl::ops::into_data_sync(small)
             .try_to_vec()
             .expect("small-tile gradient data");
         assert!(
@@ -1877,7 +1880,7 @@ mod tests {
             cfg,
             Some(kernels::BWD_TILE_LARGE),
         );
-        let large: Vec<f32> = brush_cube::into_data_sync(large)
+        let large: Vec<f32> = burn_cubecl::ops::into_data_sync(large)
             .try_to_vec()
             .expect("large-tile gradient data");
 
@@ -1954,16 +1957,16 @@ mod tests {
         let saved_grad =
             launch_image_backward_saved(make_pred(), make_gt(), make_chain(), partials, cfg);
 
-        let control_map: Vec<f32> = brush_cube::into_data_sync(control_map)
+        let control_map: Vec<f32> = burn_cubecl::ops::into_data_sync(control_map)
             .try_to_vec()
             .expect("control map data");
-        let saved_map: Vec<f32> = brush_cube::into_data_sync(saved_map)
+        let saved_map: Vec<f32> = burn_cubecl::ops::into_data_sync(saved_map)
             .try_to_vec()
             .expect("saved map data");
-        let control_grad: Vec<f32> = brush_cube::into_data_sync(control_grad)
+        let control_grad: Vec<f32> = burn_cubecl::ops::into_data_sync(control_grad)
             .try_to_vec()
             .expect("control gradient data");
-        let saved_grad: Vec<f32> = brush_cube::into_data_sync(saved_grad)
+        let saved_grad: Vec<f32> = burn_cubecl::ops::into_data_sync(saved_grad)
             .try_to_vec()
             .expect("saved gradient data");
 

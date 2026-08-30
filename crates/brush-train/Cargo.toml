@@ -35,6 +35,7 @@ rayon.workspace = true
 
 tokio = { workspace = true, features = ["io-util", "rt"] }
 burn = { workspace = true, features = ["autodiff"] }
+burn-cubecl.workspace = true
 burn-fusion.workspace = true
 burn-ir.workspace = true
 burn-wgpu.workspace = true

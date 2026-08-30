@@ -11,7 +11,7 @@ use crate::{
     sh::sh_coeffs_for_degree,
     shaders::helpers::ProjectUniforms,
 };
-use brush_cube::{CubeBackend, CubeRuntime, FusionCubeRuntime, MainBackend};
+use brush_cube::MainBackend;
 use burn::backend::Autodiff;
 use burn::backend::autodiff::checkpoint::strategy::CheckpointStrategy;
 use burn::{
@@ -27,6 +27,7 @@ use burn::{
     module::Param,
     tensor::{DType, Gradients as TensorGradients, Int, Shape, Tensor},
 };
+use burn_cubecl::{CubeBackend, CubeRuntime, fusion::FusionCubeRuntime};
 use burn_fusion::{
     Fusion, FusionHandle,
     stream::{Operation, StreamId},

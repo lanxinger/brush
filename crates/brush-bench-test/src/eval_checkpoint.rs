@@ -195,7 +195,7 @@ mod native {
         let args = Args::parse();
         validate_args(&args)?;
 
-        let device = brush_process::burn_init_setup().await;
+        let device = Device::from(brush_process::burn_init_setup().await);
         let checkpoint = load_checkpoint(&args.ply, &device).await?;
         let splat_count = checkpoint.num_splats();
 

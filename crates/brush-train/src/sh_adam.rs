@@ -4,10 +4,7 @@
 //! gradient row to the scalar second moment, then updates the full first
 //! moment and parameter row without materialising intermediate tensors.
 
-use brush_cube::{
-    CubeRuntime, CubeTensor, FusionCubeRuntime, MainBackend as Wgpu, MainBackendBase,
-    calc_cube_count_1d, into_contiguous,
-};
+use brush_cube::{MainBackend as Wgpu, MainBackendBase, calc_cube_count_1d};
 use brush_render::shaders::helpers::ProjectUniforms;
 use burn::cubecl::{Runtime, features::Plane};
 use burn::{
@@ -19,6 +16,9 @@ use burn::{
         wgpu::{AutoCompiler, WgpuRuntime},
     },
     tensor::{DType, Int, IntDType, Shape},
+};
+use burn_cubecl::{
+    CubeRuntime, fusion::FusionCubeRuntime, kernel::into_contiguous, tensor::CubeTensor,
 };
 use burn_fusion::{
     Fusion, FusionHandle,

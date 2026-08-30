@@ -84,6 +84,11 @@ jobs:
       - name: check wasm32 (native MSL feature falls back to WGSL)
         run: cargo check --locked -p brush-app --lib --target wasm32-unknown-unknown --features native-msl
 
+      - uses: taiki-e/install-action@wasm-pack
+
+      - name: test host WebGPU device interop
+        run: wasm-pack test --headless --chrome apps/brush-js
+
   # ---------------------------------------------------------------------------
 
   # One job for all targets: deny.toml's [graph] targets list drives the

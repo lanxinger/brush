@@ -2,7 +2,7 @@
 //! launches, Fusion dispatch, Burn autodiff ops and the `BilagridModel`
 //! module holding the learned grids.
 
-use brush_cube::{CubeRuntime, CubeTensor, MainBackend, MainBackendBase};
+use brush_cube::{MainBackend, MainBackendBase};
 use brush_render::burn_glue::{
     AutodiffMain, unwrap_ad_wgpu_float, wrap_ad_wgpu_float, wrap_wgpu_float,
 };
@@ -19,6 +19,7 @@ use burn::{
     module::{Module, Param},
     tensor::{DType, Device, Tensor, s},
 };
+use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
 use burn_fusion::Fusion;
 
 use crate::bilagrid_kernels as kernels;

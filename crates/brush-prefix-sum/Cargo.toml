@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 brush-cube.path = "../brush-cube"
 burn.workspace = true
+burn-cubecl.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 burn-wgpu.workspace = true
 

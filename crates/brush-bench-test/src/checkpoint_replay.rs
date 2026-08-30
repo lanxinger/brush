@@ -245,7 +245,7 @@ mod native {
 
         // Match the CLI's command batching and GPU memory allocator, then mirror
         // its inner/lift/valid splat lifecycle in `run_steps`.
-        let device = brush_process::burn_init_setup().await;
+        let device = Device::from(brush_process::burn_init_setup().await);
         device.seed(args.seed);
 
         let (batches, view_labels) = load_batches(&args).await?;

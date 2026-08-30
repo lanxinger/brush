@@ -6,7 +6,7 @@
 //! payload; zero-filled grids (and zero vignetting params) are the identity
 //! transform.
 
-use brush_cube::{CubeRuntime, CubeTensor, MainBackend, MainBackendBase};
+use brush_cube::{MainBackend, MainBackendBase};
 use brush_render::burn_glue::{
     AutodiffMain, unwrap_ad_wgpu_float, wrap_ad_wgpu_float, wrap_wgpu_float,
 };
@@ -22,6 +22,7 @@ use burn::{
     },
     tensor::{DType, Shape, Tensor},
 };
+use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
 use burn_fusion::Fusion;
 
 use crate::bilagrid::grid_dims5;

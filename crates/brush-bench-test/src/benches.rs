@@ -151,8 +151,6 @@ fn bench_camera() -> Camera {
 /// Render `iters` frames with pre-built splats. The hot loop only — callers
 /// own setup, so benches can keep splat generation out of the timed body.
 async fn forward_iters(splats: &Splats, camera: &Camera, resolution: (u32, u32), iters: u32) {
-    // Timing entry point: never measure validation readbacks.
-    brush_render::validation::set_enabled(false);
     for _ in 0..iters {
         let _ = render_splats(
             splats.clone(),
@@ -168,8 +166,6 @@ async fn forward_iters(splats: &Splats, camera: &Camera, resolution: (u32, u32),
 
 /// Render + backward `iters` times with pre-built splats. Hot loop only.
 async fn backward_iters(splats: &Splats, camera: &Camera, resolution: (u32, u32), iters: u32) {
-    // Timing entry point: never measure validation readbacks.
-    brush_render::validation::set_enabled(false);
     for _ in 0..iters {
         let diff_out = render_splats_diff(
             splats.clone(),
@@ -194,8 +190,6 @@ async fn training_iters(
     step_offset: usize,
     iters: u32,
 ) {
-    // Timing entry point: never measure validation readbacks.
-    brush_render::validation::set_enabled(false);
     for i in 0..iters as usize {
         let batch = batches[(step_offset + i) % batches.len()].clone();
         let cur_splats = splats.take().expect("splats always put back");

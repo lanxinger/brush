@@ -48,31 +48,61 @@ fn burn_options() -> RuntimeOptions {
 /// Its own device, separate from anything the viewer owns, so training never
 /// contends with GUI work on the same queue. wgpu needs an explicit setup so
 /// the adapter and limits are chosen before any kernel runs.
-async fn open_device() -> burn::tensor::Device {
+async fn open_device() -> RegisteredDevice {
     burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::DefaultDevice, burn_options())
         .await;
-    WgpuDevice::DefaultDevice.into()
+    RegisteredDevice {
+        burn: WgpuDevice::DefaultDevice.into(),
+        host: None,
+    }
 }
 
 /// Open the compute device now, rather than waiting for the first thing that
 /// needs it. Only worth calling to front-load the cost.
-pub async fn burn_init_setup() -> burn::tensor::Device {
-    device().await.clone()
+pub async fn burn_init_setup() -> WgpuDevice {
+    registered_wgpu(DEVICE.get_or_init(open_device).await).clone()
 }
 
-/// Hand Brush a wgpu setup the host already owns, instead of letting it open
-/// its own device. Useful when integrating with an existing wgpu/WebGPU
-/// application: tensor buffers then bind directly into the host's render
-/// pipelines without copies.
-///
-/// Must be called before anything touches the device, and does nothing if the
-/// device is already open. Only meaningful for the wgpu backend.
-pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuDevice {
-    if let Some(existing) = try_device()
-        && let burn::backend::DispatchDevice::Wgpu(existing) = existing.as_dispatch()
-    {
-        return existing.clone();
+/// Why a host-provided device could not become Brush's compute device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BurnInitDeviceError {
+    /// Another, different device was registered first.
+    AlreadyInitialized,
+    /// Another task is currently opening the compute device.
+    InitializationInProgress,
+}
+
+impl std::fmt::Display for BurnInitDeviceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyInitialized => {
+                f.write_str("Brush is already initialized with a different GPU device")
+            }
+            Self::InitializationInProgress => {
+                f.write_str("Brush GPU initialization is already in progress")
+            }
+        }
     }
+}
+
+impl std::error::Error for BurnInitDeviceError {}
+
+/// Register a wgpu setup the host already owns.
+///
+/// Repeating the call with the same [`Device`] is idempotent. A different
+/// device, or a call racing asynchronous initialization, returns an error so a
+/// host never mistakes buffers from another device for its own.
+pub fn try_burn_init_device(
+    adapter: Adapter,
+    device: Device,
+    queue: Queue,
+) -> Result<WgpuDevice, BurnInitDeviceError> {
+    if let Some(existing) = DEVICE.get() {
+        return registered_host(existing, &device);
+    }
+
+    let host_device = device.clone();
 
     let setup = burn_wgpu::WgpuSetup {
         instance: wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()), // unused... need to fix this in Burn.
@@ -82,10 +112,42 @@ pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuD
         backend: DefaultGraphicsApi::backend(),
     };
     let burn = burn_wgpu::init_device(setup, burn_options());
-    // A JS host can call `init()` and `initExisting()`, or a dev-mode double
-    // mount can re-run setup. Whoever gets there first wins.
-    let _ = DEVICE.set(burn.clone().into());
-    burn
+    let registered = RegisteredDevice {
+        burn: burn.clone().into(),
+        host: Some(host_device.clone()),
+    };
+
+    match DEVICE.set(registered) {
+        Ok(()) => Ok(burn),
+        Err(tokio::sync::SetError::AlreadyInitializedError(_)) => registered_host(
+            DEVICE
+                .get()
+                .expect("an initialized OnceCell must contain its value"),
+            &host_device,
+        ),
+        Err(tokio::sync::SetError::InitializingError(_)) => {
+            Err(BurnInitDeviceError::InitializationInProgress)
+        }
+    }
+}
+
+/// Register a host device with first-initializer-wins compatibility.
+///
+/// Hosts that must guarantee device identity should use
+/// [`try_burn_init_device`] and handle a conflicting prior initialization.
+pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuDevice {
+    match try_burn_init_device(adapter, device, queue) {
+        Ok(device) => device,
+        Err(BurnInitDeviceError::AlreadyInitialized) => registered_wgpu(
+            DEVICE
+                .get()
+                .expect("already-initialized device must be registered"),
+        )
+        .clone(),
+        Err(BurnInitDeviceError::InitializationInProgress) => {
+            panic!("Brush GPU initialization is already in progress")
+        }
+    }
 }
 
 use crate::{
@@ -108,6 +170,33 @@ pub struct RunningProcess {
 pub(crate) type Emitter = TryStreamEmitter<ProcessMessage, Error>;
 
 use tokio::sync::OnceCell;
+
+struct RegisteredDevice {
+    burn: burn::tensor::Device,
+    host: Option<Device>,
+}
+
+fn registered_wgpu(device: &RegisteredDevice) -> &WgpuDevice {
+    let burn::backend::DispatchDevice::Wgpu(device) = device.burn.as_dispatch() else {
+        unreachable!("the registered compute device is created by the wgpu backend")
+    };
+    device
+}
+
+fn host_matches<T: PartialEq>(registered: Option<&T>, requested: &T) -> bool {
+    registered.is_some_and(|registered| registered == requested)
+}
+
+fn registered_host(
+    registered: &RegisteredDevice,
+    requested: &Device,
+) -> Result<WgpuDevice, BurnInitDeviceError> {
+    if host_matches(registered.host.as_ref(), requested) {
+        Ok(registered_wgpu(registered).clone())
+    } else {
+        Err(BurnInitDeviceError::AlreadyInitialized)
+    }
+}
 
 /// Free cached GPU memory on whichever runtime the device belongs to.
 ///
@@ -135,17 +224,37 @@ pub fn device_memory_usage(device: &burn::tensor::Device) -> Option<burn::cubecl
     }
 }
 
-static DEVICE: OnceCell<burn::tensor::Device> = OnceCell::const_new();
+static DEVICE: OnceCell<RegisteredDevice> = OnceCell::const_new();
 
 /// The compute device, opening it if this is the first call.
 pub async fn device() -> &'static burn::tensor::Device {
-    DEVICE.get_or_init(open_device).await
+    &DEVICE.get_or_init(open_device).await.burn
 }
 
 /// The compute device, but only if it is already open. For UI that wants to
 /// report on the device without causing it to be created.
 pub fn try_device() -> Option<&'static burn::tensor::Device> {
-    DEVICE.get()
+    DEVICE.get().map(|registered| &registered.burn)
+}
+
+/// Wait for the compute device, opening the default device if necessary.
+///
+/// This preserves the former registration entry point while following the
+/// current lazy-initialization behavior.
+pub async fn wait_for_device() -> WgpuDevice {
+    burn_init_setup().await
+}
+
+#[cfg(test)]
+mod device_registration_tests {
+    use super::host_matches;
+
+    #[test]
+    fn host_identity_distinguishes_idempotence_from_conflicts() {
+        assert!(host_matches(Some(&7_u8), &7));
+        assert!(!host_matches(Some(&7_u8), &8));
+        assert!(!host_matches(None, &7));
+    }
 }
 
 fn is_training_source(vfs: &brush_vfs::BrushVfs, ply_count: usize) -> bool {

@@ -1,6 +1,5 @@
-use brush_cube::CubeRuntime;
 use burn::backend::TensorMetadata;
-use burn_wgpu::CubeTensor;
+use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
