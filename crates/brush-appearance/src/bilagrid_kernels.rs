@@ -5,9 +5,9 @@
 //! luminance as the guidance coordinate. This implementation is written for
 //! Brush's HWC tensors and custom autodiff interface.
 
-use burn_cubecl::cubecl;
-use burn_cubecl::cubecl::cube;
-use burn_cubecl::cubecl::prelude::*;
+use burn::cubecl;
+use burn::cubecl::cube;
+use burn::cubecl::prelude::*;
 
 use crate::AtomicAddF32;
 use brush_cube::is_finite_f32;

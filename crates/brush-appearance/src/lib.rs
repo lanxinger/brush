@@ -32,9 +32,9 @@ mod ppisp_kernels;
 mod ppisp_math;
 pub mod train_state;
 
+use brush_cube::{CubeRuntime, CubeTensor, FusionCubeRuntime, into_contiguous, zeros_client};
 use burn::backend::wgpu::WgpuRuntime;
 use burn::tensor::{DType, Shape};
-use burn_cubecl::{CubeRuntime, fusion::FusionCubeRuntime, tensor::CubeTensor};
 use burn_fusion::{
     FusionHandle,
     stream::{Operation, StreamId},
@@ -48,7 +48,7 @@ pub(crate) fn alloc_zeros<R: CubeRuntime>(
     shape: Shape,
     dtype: DType,
 ) -> CubeTensor<R> {
-    burn_cubecl::ops::numeric::zeros_client::<R>(
+    zeros_client::<R>(
         template.client.clone(),
         template.device.clone(),
         shape,
@@ -114,7 +114,7 @@ where
 
 /// Resolve a possibly-fused float tensor into a contiguous `CubeTensor`.
 pub(crate) fn contiguous<R: CubeRuntime>(t: CubeTensor<R>) -> CubeTensor<R> {
-    burn_cubecl::kernel::into_contiguous(t)
+    into_contiguous(t)
 }
 
 /// Optional stochastic subsampling of grid-gradient scatters. Each elected

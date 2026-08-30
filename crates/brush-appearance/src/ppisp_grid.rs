@@ -6,7 +6,7 @@
 //! payload; zero-filled grids (and zero vignetting params) are the identity
 //! transform.
 
-use brush_cube::{MainBackend, MainBackendBase};
+use brush_cube::{CubeRuntime, CubeTensor, MainBackend, MainBackendBase};
 use brush_render::burn_glue::{
     AutodiffMain, unwrap_ad_wgpu_float, wrap_ad_wgpu_float, wrap_wgpu_float,
 };
@@ -22,7 +22,6 @@ use burn::{
     },
     tensor::{DType, Shape, Tensor},
 };
-use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
 use burn_fusion::Fusion;
 
 use crate::bilagrid::grid_dims5;
@@ -95,7 +94,7 @@ fn launch_fwd<R: CubeRuntime>(
     camera_idx: usize,
     payload: GridPayload,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let vignetting = contiguous(vignetting);
@@ -142,7 +141,7 @@ fn launch_bwd<R: CubeRuntime>(
     payload: GridPayload,
     subsample: GradSubsample,
 ) -> (CubeTensor<R>, CubeTensor<R>, CubeTensor<R>) {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let vignetting = contiguous(vignetting);

@@ -26,7 +26,6 @@ clap.workspace = true
 glam.workspace = true
 log.workspace = true
 burn = { workspace = true, features = ["autodiff"] }
-burn-cubecl.workspace = true
 rand.workspace = true
 serde_json.workspace = true
 

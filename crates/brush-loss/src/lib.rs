@@ -16,6 +16,7 @@
 //! trade memory for a faster backward pass.
 
 use brush_cube::MainBackend as Wgpu;
+use brush_cube::{CubeBackend, CubeRuntime, CubeTensor, FusionCubeRuntime, into_contiguous};
 use burn::backend::autodiff::checkpoint::strategy::CheckpointStrategy;
 use burn::backend::{Autodiff, AutodiffBackend};
 use burn::{
@@ -29,10 +30,6 @@ use burn::{
         tensor::{FloatTensor, IntTensor},
     },
     tensor::{DType, Int, Shape, Tensor},
-};
-use burn_cubecl::{
-    CubeBackend, CubeRuntime, fusion::FusionCubeRuntime, kernel::into_contiguous,
-    tensor::CubeTensor,
 };
 use burn_fusion::{
     Fusion, FusionHandle,
@@ -73,11 +70,11 @@ fn use_saved_loss_partials() -> bool {
 }
 
 mod kernels {
-    use burn_cubecl::cubecl;
-    use burn_cubecl::cubecl::cube;
-    use burn_cubecl::cubecl::frontend::CompilationArg;
-    use burn_cubecl::cubecl::frontend::IndexMutExpand;
-    use burn_cubecl::cubecl::prelude::*;
+    use burn::cubecl;
+    use burn::cubecl::cube;
+    use burn::cubecl::frontend::CompilationArg;
+    use burn::cubecl::frontend::IndexMutExpand;
+    use burn::cubecl::prelude::*;
 
     /// 11-tap Gaussian weights at sigma = 1.5, normalised to sum to 1.
     /// Called from `comptime!` so it runs once per kernel build, baking each
@@ -996,7 +993,7 @@ trait SavedLossOps: Backend {
 }
 
 fn alloc_zeros<R: CubeRuntime>(template: &CubeTensor<R>) -> CubeTensor<R> {
-    burn_cubecl::ops::numeric::zeros_client::<R>(
+    brush_cube::zeros_client::<R>(
         template.client.clone(),
         template.device.clone(),
         Shape::from(template.shape().as_slice().to_vec()),
@@ -1076,8 +1073,8 @@ where
     out
 }
 
-fn cube_count_3d(c: u32, h: u32, w: u32) -> burn_cubecl::cubecl::prelude::CubeCount {
-    use burn_cubecl::cubecl::prelude::CubeCount;
+fn cube_count_3d(c: u32, h: u32, w: u32) -> burn::cubecl::prelude::CubeCount {
+    use burn::cubecl::prelude::CubeCount;
     CubeCount::Static(
         w.div_ceil(kernels::BLOCK_X),
         h.div_ceil(kernels::BLOCK_Y),
@@ -1085,8 +1082,8 @@ fn cube_count_3d(c: u32, h: u32, w: u32) -> burn_cubecl::cubecl::prelude::CubeCo
     )
 }
 
-fn cube_count_3d_bwd(c: u32, h: u32, w: u32, tile: u32) -> burn_cubecl::cubecl::prelude::CubeCount {
-    use burn_cubecl::cubecl::prelude::CubeCount;
+fn cube_count_3d_bwd(c: u32, h: u32, w: u32, tile: u32) -> burn::cubecl::prelude::CubeCount {
+    use burn::cubecl::prelude::CubeCount;
     CubeCount::Static(w.div_ceil(tile), h.div_ceil(tile), c)
 }
 
@@ -1132,7 +1129,7 @@ fn launch_image_forward_impl<R: CubeRuntime>(
     cfg: ImageLossConfig,
     save_partials: bool,
 ) -> (CubeTensor<R>, Option<CubeTensor<R>>) {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let pred = into_contiguous(pred);
     let gt_packed = into_contiguous(gt_packed);
@@ -1228,7 +1225,7 @@ fn launch_image_backward_with_tile<R: CubeRuntime>(
     cfg: ImageLossConfig,
     tile_override: Option<u32>,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let pred = into_contiguous(pred);
     let gt_packed = into_contiguous(gt_packed);
@@ -1305,7 +1302,7 @@ fn launch_image_backward_saved<R: CubeRuntime>(
     partials: CubeTensor<R>,
     cfg: ImageLossConfig,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let pred = into_contiguous(pred);
     let gt_packed = into_contiguous(gt_packed);
@@ -1366,8 +1363,8 @@ fn launch_unpack_gt_rgb<R: CubeRuntime>(
     gt_packed: CubeTensor<R>,
     composite_bg: Option<Vec3>,
 ) -> CubeTensor<R> {
+    use burn::cubecl::prelude::{CubeCount, CubeDim};
     use burn::tensor::{DType, Shape};
-    use burn_cubecl::cubecl::prelude::{CubeCount, CubeDim};
 
     let gt_packed = into_contiguous(gt_packed);
     let dims = gt_packed.shape().as_slice().to_vec();
@@ -1377,7 +1374,7 @@ fn launch_unpack_gt_rgb<R: CubeRuntime>(
     let bg = composite_bg.unwrap_or(Vec3::ZERO);
 
     let client = gt_packed.client.clone();
-    let out = burn_cubecl::ops::numeric::zeros_client::<R>(
+    let out = brush_cube::zeros_client::<R>(
         client.clone(),
         gt_packed.device.clone(),
         Shape::new([h as usize, w as usize, 3]),
@@ -1862,7 +1859,7 @@ mod tests {
             cfg,
             Some(kernels::BWD_TILE_SMALL),
         );
-        let small: Vec<f32> = burn_cubecl::ops::into_data_sync(small)
+        let small: Vec<f32> = brush_cube::into_data_sync(small)
             .try_to_vec()
             .expect("small-tile gradient data");
         assert!(
@@ -1880,7 +1877,7 @@ mod tests {
             cfg,
             Some(kernels::BWD_TILE_LARGE),
         );
-        let large: Vec<f32> = burn_cubecl::ops::into_data_sync(large)
+        let large: Vec<f32> = brush_cube::into_data_sync(large)
             .try_to_vec()
             .expect("large-tile gradient data");
 
@@ -1957,16 +1954,16 @@ mod tests {
         let saved_grad =
             launch_image_backward_saved(make_pred(), make_gt(), make_chain(), partials, cfg);
 
-        let control_map: Vec<f32> = burn_cubecl::ops::into_data_sync(control_map)
+        let control_map: Vec<f32> = brush_cube::into_data_sync(control_map)
             .try_to_vec()
             .expect("control map data");
-        let saved_map: Vec<f32> = burn_cubecl::ops::into_data_sync(saved_map)
+        let saved_map: Vec<f32> = brush_cube::into_data_sync(saved_map)
             .try_to_vec()
             .expect("saved map data");
-        let control_grad: Vec<f32> = burn_cubecl::ops::into_data_sync(control_grad)
+        let control_grad: Vec<f32> = brush_cube::into_data_sync(control_grad)
             .try_to_vec()
             .expect("control gradient data");
-        let saved_grad: Vec<f32> = burn_cubecl::ops::into_data_sync(saved_grad)
+        let saved_grad: Vec<f32> = brush_cube::into_data_sync(saved_grad)
             .try_to_vec()
             .expect("saved gradient data");
 

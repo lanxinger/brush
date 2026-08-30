@@ -1,17 +1,15 @@
 use crate::gaussian_splats::{Rasterizer, SplatRenderMode};
 use crate::kernels::types::RasterizeUniformsLaunch;
 use crate::sh::sh_coeffs_for_degree;
-use brush_cube::{calc_cube_count_1d, create_tensor};
+use brush_cube::{CubeBackend, CubeRuntime, calc_cube_count_1d, create_tensor, into_contiguous};
 use burn::backend::TensorMetadata;
 use burn::backend::ops::{FloatTensorOps, IntTensorOps};
 use burn::backend::tensor::{FloatTensor, IntTensor};
+use burn::cubecl::CubeCount;
+use burn::cubecl::CubeDim;
+use burn::cubecl::features::{AtomicUsage, Plane};
+use burn::cubecl::ir::{ElemType, FloatKind, Type};
 use burn::tensor::{DType, FloatDType, IntDType};
-use burn_cubecl::cubecl::CubeCount;
-use burn_cubecl::cubecl::CubeDim;
-use burn_cubecl::cubecl::features::{AtomicUsage, Plane};
-use burn_cubecl::cubecl::ir::{ElemType, FloatKind, Type};
-use burn_cubecl::kernel::into_contiguous;
-use burn_cubecl::{CubeBackend, CubeRuntime};
 use glam::{Vec3, uvec2};
 
 use crate::bwd::burn_glue::{

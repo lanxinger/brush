@@ -29,9 +29,9 @@
 //! atomics — same scheme as the PPISP kernels), and `dL/drgb` is exact and
 //! includes the guidance-coordinate term.
 
-use burn_cubecl::cubecl;
-use burn_cubecl::cubecl::cube;
-use burn_cubecl::cubecl::prelude::*;
+use burn::cubecl;
+use burn::cubecl::cube;
+use burn::cubecl::prelude::*;
 
 use crate::AtomicAddF32;
 use crate::bilagrid_kernels::{LUMA_B, LUMA_G, LUMA_R, plane_elected, sample_point};

@@ -1,8 +1,8 @@
-use burn_cubecl::cubecl;
-use burn_cubecl::cubecl::cube;
-use burn_cubecl::cubecl::frontend::CompilationArg;
-use burn_cubecl::cubecl::frontend::IndexMutExpand;
-use burn_cubecl::cubecl::prelude::*;
+use burn::cubecl;
+use burn::cubecl::cube;
+use burn::cubecl::frontend::CompilationArg;
+use burn::cubecl::frontend::IndexMutExpand;
+use burn::cubecl::prelude::*;
 
 #[doc(hidden)]
 pub const CHECKS_PER_ITER: u32 = 8;
@@ -66,8 +66,8 @@ mod tests {
     use super::{CHECKS_PER_ITER, get_tile_offsets};
     use brush_cube::{MainBackendBase, calc_cube_count_1d, create_tensor_from_slice};
     use burn::backend::ops::IntTensorOps;
+    use burn::cubecl::CubeDim;
     use burn::tensor::DType;
-    use burn_cubecl::cubecl::CubeDim;
     use burn_wgpu::{CubeTensor, WgpuRuntime};
     use wasm_bindgen_test::wasm_bindgen_test;
 

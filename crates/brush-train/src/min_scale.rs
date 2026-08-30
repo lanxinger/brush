@@ -1,17 +1,15 @@
 //! One-pass GPU evaluation of the Mip-Splatting world-space scale floor.
 
-use brush_cube::{MainBackend as Wgpu, MainBackendBase, calc_cube_count_1d};
+use brush_cube::{
+    CubeTensor, FusionCubeRuntime, MainBackend as Wgpu, MainBackendBase, calc_cube_count_1d,
+    into_contiguous,
+};
+use burn::cubecl;
+use burn::cubecl::{CubeDim, cube, prelude::*};
 use burn::{
     Tensor as BurnTensor,
     backend::{Backend, Dispatch, TensorMetadata, tensor::FloatTensor},
     tensor::{DType, Shape, TensorData},
-};
-use burn_cubecl::{
-    cubecl,
-    cubecl::{CubeDim, cube, prelude::*},
-    fusion::FusionCubeRuntime,
-    kernel::into_contiguous,
-    tensor::CubeTensor,
 };
 use burn_fusion::{
     Fusion, FusionHandle,

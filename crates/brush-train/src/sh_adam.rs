@@ -4,8 +4,12 @@
 //! gradient row to the scalar second moment, then updates the full first
 //! moment and parameter row without materialising intermediate tensors.
 
-use brush_cube::{MainBackend as Wgpu, MainBackendBase, calc_cube_count_1d};
+use brush_cube::{
+    CubeRuntime, CubeTensor, FusionCubeRuntime, MainBackend as Wgpu, MainBackendBase,
+    calc_cube_count_1d, into_contiguous,
+};
 use brush_render::shaders::helpers::ProjectUniforms;
+use burn::cubecl::{Runtime, features::Plane};
 use burn::{
     Tensor,
     backend::{
@@ -15,13 +19,6 @@ use burn::{
         wgpu::{AutoCompiler, WgpuRuntime},
     },
     tensor::{DType, Int, IntDType, Shape},
-};
-use burn_cubecl::{
-    CubeRuntime,
-    cubecl::{Runtime, features::Plane},
-    fusion::FusionCubeRuntime,
-    kernel::into_contiguous,
-    tensor::CubeTensor,
 };
 use burn_fusion::{
     Fusion, FusionHandle,
@@ -213,9 +210,9 @@ pub(crate) fn sparse_sh_adam_supported(param: &Tensor<3>) -> bool {
 
 mod kernel {
     use brush_render::kernels::sh::{num_sh_coeffs, sh_basis, sh_color_component};
-    use burn_cubecl::cubecl;
-    use burn_cubecl::cubecl::cube;
-    use burn_cubecl::cubecl::prelude::*;
+    use burn::cubecl;
+    use burn::cubecl::cube;
+    use burn::cubecl::prelude::*;
 
     use super::{PLANE_SIZE, SPLATS_PER_WORKGROUP};
 
@@ -625,7 +622,7 @@ impl ShAdamOps for MainBackendBase {
             kernel::sh_adam_kernel::launch_unchecked::<WgpuRuntime>(
                 &client,
                 workgroups,
-                burn_cubecl::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
+                burn::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
                 param.into_tensor_arg(),
                 grad.into_tensor_arg(),
                 moment_1.into_tensor_arg(),
@@ -788,7 +785,7 @@ impl ShAdamOps for MainBackendBase {
                 kernel::build_compact_sh_map_kernel::launch::<WgpuRuntime>(
                     &client,
                     calc_cube_count_1d(render.num_visible, WORKGROUP_SIZE),
-                    burn_cubecl::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
+                    burn::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
                     global_from_compact_gid.into_tensor_arg(),
                     compact_grads.clone().into_tensor_arg(),
                     compact_plus_one_from_global.clone().into_tensor_arg(),
@@ -809,7 +806,7 @@ impl ShAdamOps for MainBackendBase {
                 kernel::sparse_sh_adam_kernel::launch_unchecked::<WgpuRuntime>(
                     &client,
                     calc_cube_count_1d(num_splats, SPLATS_PER_WORKGROUP),
-                    burn_cubecl::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
+                    burn::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
                     param.into_tensor_arg(),
                     render_transforms.into_tensor_arg(),
                     compact_plus_one_from_global.into_tensor_arg(),

@@ -24,7 +24,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn shader_compiler_matches_native_msl_feature() {
-    use burn_cubecl::cubecl::Runtime;
+    use burn::cubecl::Runtime;
     use burn_wgpu::{AutoCompiler, WgpuRuntime};
 
     let device = brush_cube::test_helpers::test_device().await;

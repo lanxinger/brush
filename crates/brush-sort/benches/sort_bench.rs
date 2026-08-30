@@ -16,9 +16,9 @@ use brush_cube::CubeTensor;
 use brush_cube::MainRuntime;
 use brush_sort::radix_argsort;
 use burn::backend::wgpu::WgpuDevice;
+use burn::cubecl::Runtime;
+use burn::cubecl::future::block_on;
 use burn::tensor::{DType, Shape};
-use burn_cubecl::cubecl::Runtime;
-use burn_cubecl::cubecl::future::block_on;
 
 #[cfg(not(target_family = "wasm"))]
 fn main() {

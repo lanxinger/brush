@@ -5,7 +5,7 @@
 //! Burn autodiff op, the `PpispModel` module and its (tensor-op based)
 //! parameter regularisation.
 
-use brush_cube::{MainBackend, MainBackendBase};
+use brush_cube::{CubeRuntime, CubeTensor, MainBackend, MainBackendBase};
 use brush_render::burn_glue::{
     AutodiffMain, unwrap_ad_wgpu_float, wrap_ad_wgpu_float, wrap_wgpu_float,
 };
@@ -22,7 +22,6 @@ use burn::{
     module::{Module, Param},
     tensor::{DType, Device, Shape, Tensor, TensorData},
 };
-use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
 use burn_fusion::Fusion;
 
 use crate::ppisp_kernels as kernels;
@@ -111,7 +110,7 @@ fn launch_fwd<R: CubeRuntime>(
     frame_idx: usize,
     stages: PpispStages,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let exposure = contiguous(exposure);
     let vignetting = contiguous(vignetting);
@@ -160,7 +159,7 @@ fn launch_bwd<R: CubeRuntime>(
     frame_idx: usize,
     stages: PpispStages,
 ) -> (CubeTensor<R>, CubeTensor<R>) {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let exposure = contiguous(exposure);
     let vignetting = contiguous(vignetting);
