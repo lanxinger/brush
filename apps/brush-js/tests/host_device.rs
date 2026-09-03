@@ -30,9 +30,14 @@ export async function createBrushTestDataset(transforms, initPly, image) {
   return directory;
 }
 
-export function brushOneStepConfig() {
+export function brushLoadOnlyConfig() {
   return async (config) => {
+    // Load and publish the training splats without entering CubeCL's
+    // autotuner. Headless WebGPU adapters can lack timestamp-query support,
+    // which CubeCL currently requires to profile an optimization step on
+    // WASM. This test owns the host-device and buffer-interop contract.
     config["total-train-iters"] = 1;
+    config["start-iter"] = 1;
     config["max-frames"] = 1;
     config["max-resolution"] = 50;
     config["sh-degree"] = 0;
@@ -124,8 +129,8 @@ extern "C" {
         image: &Uint8Array,
     ) -> Promise;
 
-    #[wasm_bindgen(js_name = brushOneStepConfig)]
-    fn brush_one_step_config() -> Function;
+    #[wasm_bindgen(js_name = brushLoadOnlyConfig)]
+    fn brush_load_only_config() -> Function;
 
     #[wasm_bindgen(js_name = exerciseBrushBuffers)]
     fn exercise_brush_buffers(
@@ -184,16 +189,19 @@ async fn host_device_owns_training_buffers_and_rejects_replacement() {
         .dyn_into::<web_sys::FileSystemDirectoryHandle>()
         .expect("OPFS returned a directory handle");
 
-    let training = app.start_training_from_directory(handle, brush_one_step_config());
-    let messages = training
-        .train_steps(1)
-        .await
-        .expect("run one training step");
+    let training = app.start_training_from_directory(handle, brush_load_only_config());
+    let messages = training.train_steps(1).await.expect("load training splats");
     assert!(
         messages
             .iter()
-            .any(|message| matches!(message.kind(), BrushMessageKind::TrainStep)),
-        "one-step run produced no TrainStep message"
+            .any(|message| matches!(message.kind(), BrushMessageKind::DoneLoading)),
+        "training dataset did not finish loading"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message.kind(), BrushMessageKind::DoneTraining)),
+        "load-only training run did not finish"
     );
 
     let splats = training
@@ -218,7 +226,8 @@ async fn host_device_owns_training_buffers_and_rejects_replacement() {
     assert!(
         error
             .as_string()
-            .is_some_and(|message| message.contains("different GPU device"))
+            .is_some_and(|message| message.contains("different GPU device")),
+        "replacement-device error did not explain the device conflict"
     );
 
     training.cancel();

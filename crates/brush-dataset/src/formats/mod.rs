@@ -134,9 +134,15 @@ impl DatasetFileIndex {
 
         for path in vfs.iter_files() {
             let components = normalized_components(path);
-            let masks_index = components.iter().position(|part| part == "masks");
+            let directories = &components[..components.len().saturating_sub(1)];
+            let masks_index = directories.iter().position(|part| part == "masks");
 
-            if masks_index.is_none() {
+            // Per-image sidecars may share the photograph's file name and
+            // extension. Never let one claim the bare image-name suffix.
+            let is_sidecar = directories
+                .iter()
+                .any(|part| matches!(part.as_str(), "masks" | "depth" | "normal"));
+            if !is_sidecar {
                 for start in 0..components.len() {
                     insert_min_path(&mut images_by_suffix, components[start..].join("/"), path);
                 }
@@ -400,6 +406,33 @@ mod tests {
         assert_eq!(
             index.find_image_by_name("FRAME.PNG"),
             Some(Path::new("images/nested/frame.png"))
+        );
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn test_sidecars_never_resolve_as_images() {
+        let vfs = BrushVfs::create_test_vfs(vec![
+            PathBuf::from("images/frame.png"),
+            PathBuf::from("depth/frame.png"),
+            PathBuf::from("normal/frame.png"),
+            PathBuf::from("masks/frame.png"),
+        ]);
+        let index = DatasetFileIndex::new(&vfs);
+
+        assert_eq!(
+            index.find_image_by_name("frame.png"),
+            Some(Path::new("images/frame.png"))
+        );
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn test_sidecar_names_only_apply_to_directories() {
+        let vfs = BrushVfs::create_test_vfs(vec![PathBuf::from("images/depth.png")]);
+        let index = DatasetFileIndex::new(&vfs);
+
+        assert_eq!(
+            index.find_image_by_name("depth.png"),
+            Some(Path::new("images/depth.png"))
         );
     }
 }

@@ -1,4 +1,6 @@
-use super::{DatasetFileIndex, DatasetLoadResult, FormatError, opengl_c2w_to_pose};
+use super::{
+    DatasetFileIndex, DatasetLoadResult, FormatError, opengl_c2w_to_pose, select_descriptor,
+};
 use crate::{
     Dataset,
     config::LoadDatasetConfig,
@@ -285,18 +287,31 @@ pub async fn read_dataset(
 ) -> Option<Result<DatasetLoadResult, FormatError>> {
     log::info!("Loading nerfstudio dataset");
 
-    let json_files: Vec<_> = vfs.files_with_extension("json").collect();
+    let mut json_files: Vec<_> = vfs.files_with_extension("json").collect();
+    json_files.sort_unstable();
 
     let transforms_path = if json_files.len() == 1 {
-        json_files.first()?
+        json_files.first()?.clone()
     } else {
         // If there's multiple options, only pick files which are either exactly
-        // transforms.json or end with transforms_train.json (a la transforms_train.json)
-        vfs.files_ending_in("transforms.json")
-            .next()
-            .or_else(|| vfs.files_ending_in("transforms_train.json").next())?
+        // transforms.json or end with transforms_train.json. transforms.json
+        // keeps precedence, but ambiguity is reported rather than guessed.
+        let choose = |name: &str| {
+            select_descriptor(
+                vfs.files_ending_in(name).map(Path::to_path_buf).collect(),
+                &format!("files named '{name}'"),
+            )
+        };
+        match choose("transforms.json") {
+            Ok(Some(path)) => path,
+            Ok(None) => match choose("transforms_train.json") {
+                Ok(Some(path)) => path,
+                Ok(None) => return None,
+                Err(error) => return Some(Err(error)),
+            },
+            Err(error) => return Some(Err(error)),
+        }
     };
-    let transforms_path = transforms_path.to_path_buf();
     Some(read_dataset_inner(vfs, load_args, json_files, transforms_path).await)
 }
 
@@ -326,14 +341,21 @@ async fn read_dataset_inner(
     .await?;
 
     // Use transforms_val as eval, or _test if no _val is present. (Brush doesn't really have any notion of a test set).
-    let eval_trans_path = json_files
-        .iter()
-        .find(|x| x.ends_with("transforms_val.json"))
-        .or_else(|| {
+    let choose = |name: &str| {
+        select_descriptor(
             json_files
                 .iter()
-                .find(|x| x.ends_with("transforms_test.json"))
-        });
+                .filter(|path| path.ends_with(name))
+                .cloned()
+                .collect(),
+            &format!("files named '{name}'"),
+        )
+    };
+    let eval_trans_path = match choose("transforms_val.json")? {
+        Some(path) => Some(path),
+        None => choose("transforms_test.json")?,
+    };
+    let eval_trans_path = eval_trans_path.as_ref();
     // If a separate eval file is specified, read it.
     let val_views = if let Some(eval_trans_path) = eval_trans_path {
         let mut json_str = String::new();
@@ -431,5 +453,41 @@ mod tests {
             resolve_frame_image_path(&vfs, Path::new("transforms.json"), "images/frame_001").await,
             Some(PathBuf::from("images/frame_001.png"))
         );
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn descriptor_selection_prefers_the_shallowest_path() {
+        let root = PathBuf::from("transforms.json");
+        let nested = PathBuf::from("backup/transforms.json");
+
+        for candidates in [
+            vec![nested.clone(), root.clone()],
+            vec![root.clone(), nested],
+        ] {
+            assert_eq!(
+                select_descriptor(candidates, "files named 'transforms.json'").unwrap(),
+                Some(root.clone())
+            );
+        }
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn descriptor_selection_rejects_same_depth_ambiguity() {
+        let first = PathBuf::from("a/transforms.json");
+        let second = PathBuf::from("b/transforms.json");
+        let mut messages = Vec::new();
+
+        for candidates in [vec![first.clone(), second.clone()], vec![second, first]] {
+            let FormatError::AmbiguousDataset(message) =
+                select_descriptor(candidates, "files named 'transforms.json'").unwrap_err()
+            else {
+                panic!("expected an ambiguous-dataset error");
+            };
+            messages.push(message);
+        }
+
+        assert_eq!(messages[0], messages[1]);
+        assert!(messages[0].contains("a/transforms.json"));
+        assert!(messages[0].contains("b/transforms.json"));
     }
 }
