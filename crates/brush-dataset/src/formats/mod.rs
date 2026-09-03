@@ -36,6 +36,9 @@ pub enum FormatError {
     #[error("Error when decoding format: {0}")]
     InvalidFormat(String),
 
+    #[error("Ambiguous dataset: {0}")]
+    AmbiguousDataset(String),
+
     #[error("Error loading splat data: {0}")]
     PlyError(#[from] DeserializeError),
 
@@ -216,6 +219,42 @@ where
     if path < entry.as_path() {
         *entry = path.to_path_buf();
     }
+}
+
+/// Select the shallowest dataset descriptor deterministically. Multiple
+/// candidates at the same shallowest depth describe different datasets, so
+/// choosing one would make loading depend on VFS hash-map iteration order.
+fn select_descriptor(
+    mut candidates: Vec<PathBuf>,
+    description: &str,
+) -> Result<Option<PathBuf>, FormatError> {
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let Some(min_depth) = candidates
+        .iter()
+        .map(|path| path.components().count())
+        .min()
+    else {
+        return Ok(None);
+    };
+    let mut shallowest: Vec<_> = candidates
+        .into_iter()
+        .filter(|path| path.components().count() == min_depth)
+        .collect();
+
+    if shallowest.len() == 1 {
+        return Ok(shallowest.pop());
+    }
+
+    let paths = shallowest
+        .iter()
+        .map(|path| format!("'{}'", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(FormatError::AmbiguousDataset(format!(
+        "multiple {description} sit at the same depth: {paths}; point Brush at the dataset you intend to load"
+    )))
 }
 
 /// Convert an OpenGL/Blender camera-to-world matrix (the nerfstudio
