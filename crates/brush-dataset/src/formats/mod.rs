@@ -36,6 +36,9 @@ pub enum FormatError {
     #[error("Error when decoding format: {0}")]
     InvalidFormat(String),
 
+    #[error("Ambiguous dataset: {0}")]
+    AmbiguousDataset(String),
+
     #[error("Error loading splat data: {0}")]
     PlyError(#[from] DeserializeError),
 
@@ -131,9 +134,15 @@ impl DatasetFileIndex {
 
         for path in vfs.iter_files() {
             let components = normalized_components(path);
-            let masks_index = components.iter().position(|part| part == "masks");
+            let directories = &components[..components.len().saturating_sub(1)];
+            let masks_index = directories.iter().position(|part| part == "masks");
 
-            if masks_index.is_none() {
+            // Per-image sidecars may share the photograph's file name and
+            // extension. Never let one claim the bare image-name suffix.
+            let is_sidecar = directories
+                .iter()
+                .any(|part| matches!(part.as_str(), "masks" | "depth" | "normal"));
+            if !is_sidecar {
                 for start in 0..components.len() {
                     insert_min_path(&mut images_by_suffix, components[start..].join("/"), path);
                 }
@@ -216,6 +225,42 @@ where
     if path < entry.as_path() {
         *entry = path.to_path_buf();
     }
+}
+
+/// Select the shallowest dataset descriptor deterministically. Multiple
+/// candidates at the same shallowest depth describe different datasets, so
+/// choosing one would make loading depend on VFS hash-map iteration order.
+fn select_descriptor(
+    mut candidates: Vec<PathBuf>,
+    description: &str,
+) -> Result<Option<PathBuf>, FormatError> {
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let Some(min_depth) = candidates
+        .iter()
+        .map(|path| path.components().count())
+        .min()
+    else {
+        return Ok(None);
+    };
+    let mut shallowest: Vec<_> = candidates
+        .into_iter()
+        .filter(|path| path.components().count() == min_depth)
+        .collect();
+
+    if shallowest.len() == 1 {
+        return Ok(shallowest.pop());
+    }
+
+    let paths = shallowest
+        .iter()
+        .map(|path| format!("'{}'", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(FormatError::AmbiguousDataset(format!(
+        "multiple {description} sit at the same depth: {paths}; point Brush at the dataset you intend to load"
+    )))
 }
 
 /// Convert an OpenGL/Blender camera-to-world matrix (the nerfstudio
@@ -361,6 +406,33 @@ mod tests {
         assert_eq!(
             index.find_image_by_name("FRAME.PNG"),
             Some(Path::new("images/nested/frame.png"))
+        );
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn test_sidecars_never_resolve_as_images() {
+        let vfs = BrushVfs::create_test_vfs(vec![
+            PathBuf::from("images/frame.png"),
+            PathBuf::from("depth/frame.png"),
+            PathBuf::from("normal/frame.png"),
+            PathBuf::from("masks/frame.png"),
+        ]);
+        let index = DatasetFileIndex::new(&vfs);
+
+        assert_eq!(
+            index.find_image_by_name("frame.png"),
+            Some(Path::new("images/frame.png"))
+        );
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn test_sidecar_names_only_apply_to_directories() {
+        let vfs = BrushVfs::create_test_vfs(vec![PathBuf::from("images/depth.png")]);
+        let index = DatasetFileIndex::new(&vfs);
+
+        assert_eq!(
+            index.find_image_by_name("depth.png"),
+            Some(Path::new("images/depth.png"))
         );
     }
 }

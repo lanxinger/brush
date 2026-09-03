@@ -24,7 +24,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn shader_compiler_matches_native_msl_feature() {
-    use burn_cubecl::cubecl::Runtime;
+    use burn::cubecl::Runtime;
     use burn_wgpu::{AutoCompiler, WgpuRuntime};
 
     let device = brush_cube::test_helpers::test_device().await;
@@ -647,7 +647,8 @@ async fn render_empty_primitives(
     pass: RasterPass,
 ) -> RenderOutput<MainBackendBase> {
     let device = brush_cube::test_helpers::test_device().await;
-    let empty = || create_tensor_from_slice::<f32>(&[], &device, DType::F32);
+    let empty =
+        || create_tensor_from_slice::<f32, brush_cube::MainRuntime>(&[], &device, DType::F32);
     let transforms = MainBackendBase::float_reshape(empty(), Shape::new([0, 10]));
     let sh_coeffs = MainBackendBase::float_reshape(empty(), Shape::new([0, 1, 3]));
     let raw_opacities = MainBackendBase::float_reshape(empty(), Shape::new([0]));

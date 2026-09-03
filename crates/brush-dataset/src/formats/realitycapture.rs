@@ -1,5 +1,6 @@
 use super::{
-    DatasetFileIndex, DatasetLoadResult, FormatError, opengl_c2w_to_pose, split_eval_every,
+    DatasetFileIndex, DatasetLoadResult, FormatError, opengl_c2w_to_pose, select_descriptor,
+    split_eval_every,
 };
 use crate::{
     Dataset,
@@ -12,7 +13,7 @@ use brush_render::kernels::camera_model::CameraModel::{Pinhole, RadialTangential
 use brush_render::kernels::camera_model::radial_tangential_8::RadialTangential8Params;
 use brush_vfs::BrushVfs;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
@@ -61,9 +62,11 @@ pub async fn read_dataset(
     vfs: Arc<BrushVfs>,
     load_args: &LoadDatasetConfig,
 ) -> Option<Result<DatasetLoadResult, FormatError>> {
-    let csv_paths: Vec<_> = vfs.files_with_extension("csv").collect();
+    let mut csv_paths: Vec<_> = vfs.files_with_extension("csv").collect();
+    csv_paths.sort_unstable();
 
-    // Find a csv whose header looks like the RealityCapture camera format.
+    // Find every csv whose header looks like the RealityCapture camera format.
+    let mut candidates: Vec<(PathBuf, String)> = Vec::new();
     for path in csv_paths {
         let Ok(mut reader) = vfs.reader_at_path(&path).await else {
             continue;
@@ -76,12 +79,26 @@ pub async fn read_dataset(
             continue;
         };
         if parse_header(first_line).is_some() {
-            log::info!("Loading RealityCapture dataset from {path:?}");
-            return Some(read_dataset_inner(vfs, load_args, buf).await);
+            candidates.push((path, buf));
         }
     }
 
-    None
+    let chosen = match select_descriptor(
+        candidates.iter().map(|(path, _)| path.clone()).collect(),
+        "RealityCapture camera CSV files",
+    ) {
+        Ok(Some(path)) => path,
+        Ok(None) => return None,
+        Err(error) => return Some(Err(error)),
+    };
+    let contents = candidates
+        .into_iter()
+        .find(|(path, _)| *path == chosen)
+        .map(|(_, contents)| contents)
+        .expect("the selected CSV came from the candidate list");
+
+    log::info!("Loading RealityCapture dataset from {chosen:?}");
+    Some(read_dataset_inner(vfs, load_args, contents).await)
 }
 
 async fn read_dataset_inner(
@@ -228,6 +245,8 @@ fn build_camera_model(k1: f64, k2: f64, k3: f64, t1: f64, t2: f64) -> CameraMode
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_family = "wasm"))]
+    use std::collections::BTreeSet;
     use wasm_bindgen_test::wasm_bindgen_test;
 
     const HEADER: &str = "#name,x,y,alt,heading,pitch,roll,f,px,py,k1,k2,k3,k4,t1,t2";
@@ -297,5 +316,90 @@ mod tests {
             (p.k1, p.k2, p.k3, p.k4, p.k5, p.k6, p.p1, p.p2),
             (1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 4.0, 5.0)
         );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn test_config() -> LoadDatasetConfig {
+        LoadDatasetConfig {
+            max_frames: None,
+            max_resolution: 1920,
+            eval_split_every: None,
+            train_on_eval: false,
+            subsample_frames: None,
+            subsample_points: None,
+            alpha_mode: None,
+            invert_masks: false,
+            max_scene_batch_cache_size: 0,
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn write_dataset(dir: &Path, prefix: &str, frame_count: usize) {
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let mut csv = String::from("#name,x,y,alt,heading,pitch,roll,f\n");
+        for index in 0..frame_count {
+            let name = format!("{prefix}_{index}.png");
+            csv.push_str(&format!("{name},1,2,3,10,20,30,20\n"));
+            image::RgbImage::from_pixel(4, 3, image::Rgb([10, 20, 30]))
+                .save(dir.join(name))
+                .unwrap();
+        }
+        tokio::fs::write(dir.join("cameras.csv"), csv)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn load_identity(dir: &Path) -> Result<String, FormatError> {
+        let vfs = Arc::new(BrushVfs::from_path(dir).await.unwrap());
+        let result = read_dataset(vfs, &test_config())
+            .await
+            .expect("RealityCapture dataset should be detected")?;
+        let mut paths: Vec<_> = result
+            .dataset
+            .train
+            .views
+            .iter()
+            .map(|view| view.image.path().display().to_string())
+            .collect();
+        paths.sort();
+        Ok(paths.join(","))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn rejects_same_depth_realitycapture_descriptors_deterministically() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dataset(&dir.path().join("a"), "alpha", 2).await;
+        write_dataset(&dir.path().join("b"), "beta", 3).await;
+
+        let mut messages = BTreeSet::new();
+        for _ in 0..40 {
+            let error = load_identity(dir.path()).await.unwrap_err();
+            let FormatError::AmbiguousDataset(message) = error else {
+                panic!("expected ambiguous dataset error");
+            };
+            messages.insert(message);
+        }
+
+        assert_eq!(messages.len(), 1);
+        let message = messages.first().unwrap();
+        assert!(message.contains("a/cameras.csv"));
+        assert!(message.contains("b/cameras.csv"));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn prefers_root_realitycapture_descriptor_over_nested_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dataset(dir.path(), "root", 2).await;
+        write_dataset(&dir.path().join("backup"), "old", 3).await;
+
+        for _ in 0..40 {
+            assert_eq!(
+                load_identity(dir.path()).await.unwrap(),
+                "root_0.png,root_1.png"
+            );
+        }
     }
 }

@@ -86,7 +86,7 @@ fn launch_slice_fwd<R: CubeRuntime>(
     rgb: CubeTensor<R>,
     view_idx: usize,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let rgb = contiguous(rgb);
@@ -121,7 +121,7 @@ fn launch_slice_bwd<R: CubeRuntime>(
     v_out: CubeTensor<R>,
     view_idx: usize,
 ) -> (CubeTensor<R>, CubeTensor<R>) {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let rgb = contiguous(rgb);

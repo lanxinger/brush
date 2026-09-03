@@ -1,8 +1,5 @@
 use brush_process::message::ProcessMessage;
 use brush_process::message::TrainMessage;
-use burn_cubecl::cubecl::Runtime;
-use burn_wgpu::AutoCompiler;
-use burn_wgpu::WgpuRuntime;
 use eframe::egui_wgpu::RenderState;
 use web_time::{Duration, Instant};
 use wgpu::AdapterInfo;
@@ -240,9 +237,9 @@ impl AppPane for StatsPanel {
                 .is_none_or(|sample| sample.elapsed() >= MEMORY_SAMPLE_INTERVAL)
             {
                 self.last_memory_sample = Some(Instant::now());
-                let device = process.burn_device();
-                let client = WgpuRuntime::<AutoCompiler>::client(&device);
-                if let Ok(memory) = client.memory_usage() {
+                if let Some(memory) =
+                    brush_process::try_device().and_then(brush_process::device_memory_usage)
+                {
                     self.memory_stats = Some(MemoryStats {
                         bytes_in_use: memory.bytes_in_use,
                         bytes_reserved: memory.bytes_reserved,
@@ -251,11 +248,10 @@ impl AppPane for StatsPanel {
                 }
             }
 
-            ui.add_space(10.0);
-            ui.heading("GPU");
-            ui.separator();
-
             if let Some(memory) = self.memory_stats {
+                ui.add_space(10.0);
+                ui.heading("Compute GPU");
+                ui.separator();
                 stats_grid(ui, "memory_stats_grid", |ui, v| {
                     stat_row(ui, "Bytes in use", bytes_format(memory.bytes_in_use), v);
                     stat_row(ui, "Bytes reserved", bytes_format(memory.bytes_reserved), v);
@@ -272,6 +268,9 @@ impl AppPane for StatsPanel {
             if !cfg!(target_family = "wasm")
                 && let Some(adapter_info) = &self.adapter_info
             {
+                ui.add_space(10.0);
+                ui.heading("Viewer GPU");
+                ui.separator();
                 stats_grid(ui, "gpu_info_grid", |ui, v| {
                     stat_row(ui, "Name", &adapter_info.name, v);
                     stat_row(ui, "Type", format!("{:?}", adapter_info.device_type), v);

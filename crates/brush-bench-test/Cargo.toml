@@ -41,9 +41,9 @@ rerun = { workspace = true }
 [dev-dependencies]
 brush-async = { path = "../brush-async" }
 brush-cube = { path = "../brush-cube" }
-# Keep full tensor/gradient validation in tests and Divan benches. The
-# standalone checkpoint replay is a normal release binary and must not pay
-# for synchronous debug readbacks on every training step.
+# Keep full tensor/gradient validation in tests. The Divan executable disables
+# readbacks at its main entry point; normal release binaries do not enable this
+# dev-only feature.
 brush-render = { path = "../brush-render", features = ["debug-validation"] }
 
 burn-wgpu.workspace = true

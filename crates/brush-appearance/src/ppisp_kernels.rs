@@ -20,9 +20,9 @@
 //!   center` (softplus/sigmoid transformed in-kernel).
 
 use brush_cube::Vec3A;
-use burn_cubecl::cubecl;
-use burn_cubecl::cubecl::cube;
-use burn_cubecl::cubecl::prelude::*;
+use burn::cubecl;
+use burn::cubecl::cube;
+use burn::cubecl::prelude::*;
 
 pub const BLOCK_SIZE: u32 = 128;
 /// Number of scalar parameter gradients reduced per pixel:

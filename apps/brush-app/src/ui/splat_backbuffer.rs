@@ -1,12 +1,9 @@
 use brush_async::{Actor, AsyncMap};
 use brush_process::slot::Slot;
-use brush_render::{
-    TextureMode, burn_glue::resolve_to_cube_float, camera::Camera, gaussian_splats::Splats,
-    render_splats,
-};
-use burn::tensor::Tensor;
+use brush_render::{TextureMode, camera::Camera, gaussian_splats::Splats, render_splats};
 use egui::Rect;
 use glam::{UVec2, Vec3};
+use std::sync::Arc;
 
 use eframe::egui_wgpu::{self, CallbackTrait, wgpu};
 
@@ -26,12 +23,33 @@ struct LastRenderState {
     img_size: UVec2,
 }
 
+/// A rendered frame on its way to the screen.
+///
+/// Training runs on its own device, so there is no way to bind its buffer into
+/// the viewer's bind group. The pixels come back through the host instead:
+/// packed RGBA8, four bytes per pixel, so there is nothing to convert on the
+/// way. The readback is awaited off the render thread, so no frame is dropped
+/// for it.
+#[derive(Clone)]
+struct Frame {
+    width: u32,
+    height: u32,
+    pixels: Arc<Vec<u8>>,
+}
+
 pub struct SplatBackbuffer {
-    pipe: AsyncMap<RenderRequest, Tensor<3>>,
+    pipe: AsyncMap<RenderRequest, Frame>,
 }
 
 impl SplatBackbuffer {
-    pub fn new(state: &eframe::egui_wgpu::RenderState, actor: Actor) -> Self {
+    pub fn new(state: &eframe::egui_wgpu::RenderState) -> Self {
+        // The viewer gets its own thread, deliberately. Reading a frame back
+        // from cubecl-metal blocks the calling thread until the GPU drains
+        // (cubecl-metal's `read` flushes and waits synchronously, then
+        // memcpys), and cubecl assigns one stream per thread by default. On
+        // the process actor that would mean every displayed frame blocks the
+        // thread driving training, on training's own stream.
+        let actor = Actor::new("splat-view");
         // Register splat backbuffer resources
         state
             .renderer
@@ -54,7 +72,20 @@ impl SplatBackbuffer {
                     TextureMode::Packed,
                 )
                 .await;
-                image
+
+                let shape = image.shape();
+                let (height, width) = (shape[0] as u32, shape[1] as u32);
+
+                let data = image
+                    .into_data_async()
+                    .await
+                    .expect("Failed to read back frame");
+
+                Frame {
+                    width,
+                    height,
+                    pixels: Arc::new(data.into_bytes().to_vec()),
+                }
             },
             |req: &RenderRequest| req.ctx.request_repaint(),
         );
@@ -107,19 +138,11 @@ impl SplatBackbuffer {
             });
         }
 
-        if let Some(image) = self.pipe.latest() {
-            let shape = image.shape();
-            let img_height = shape[0] as u32;
-            let img_width = shape[1] as u32;
-
+        if let Some(frame) = self.pipe.latest() {
             ui.painter()
                 .add(eframe::egui_wgpu::Callback::new_paint_callback(
                     rect,
-                    SplatBackbufferPainter {
-                        last_img: image,
-                        img_width,
-                        img_height,
-                    },
+                    SplatBackbufferPainter { frame },
                 ));
         }
     }
@@ -136,8 +159,15 @@ pub struct SplatBackbufferResources {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group_layout: wgpu::BindGroupLayout,
-    // Per-frame bind group - created in prepare() with the current tensor buffer
+    // Bound to `upload_buffer`; rebuilt only when that buffer is reallocated.
     bind_group: Option<wgpu::BindGroup>,
+    // Destination for copied frames. Kept around between frames and only
+    // reallocated when the window resizes.
+    upload_buffer: Option<wgpu::Buffer>,
+    // `AsyncMap::latest()` clones the same `Frame` until rendering publishes a
+    // replacement. Keep its Arc identity so ordinary UI repaints do not upload
+    // the same pixels again.
+    uploaded_pixels: Option<Arc<Vec<u8>>>,
 }
 
 impl SplatBackbufferResources {
@@ -223,14 +253,38 @@ impl SplatBackbufferResources {
             uniform_buffer,
             bind_group_layout,
             bind_group: None,
+            upload_buffer: None,
+            uploaded_pixels: None,
+        }
+    }
+
+    /// Make sure the upload buffer holds at least `size` bytes, allocating a
+    /// new one if the current one is too small. Returns whether it changed.
+    fn reserve_upload_buffer(&mut self, device: &wgpu::Device, size: u64) -> bool {
+        let fits = self
+            .upload_buffer
+            .as_ref()
+            .is_some_and(|b| b.size() >= size);
+        if !fits {
+            self.upload_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Splat Backbuffer Upload Buffer"),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            true
+        } else {
+            false
         }
     }
 }
 
 struct SplatBackbufferPainter {
-    last_img: Tensor<3>,
-    img_width: u32,
-    img_height: u32,
+    frame: Frame,
+}
+
+fn needs_upload(uploaded: Option<&Arc<Vec<u8>>>, current: &Arc<Vec<u8>>) -> bool {
+    uploaded.is_none_or(|pixels| !Arc::ptr_eq(pixels, current))
 }
 
 impl CallbackTrait for SplatBackbufferPainter {
@@ -246,40 +300,43 @@ impl CallbackTrait for SplatBackbufferPainter {
             return Vec::new();
         };
 
+        let frame_changed = needs_upload(res.uploaded_pixels.as_ref(), &self.frame.pixels);
+        if !frame_changed {
+            return Vec::new();
+        }
+
         // Update uniform buffer with image dimensions
         queue.write_buffer(
             &res.uniform_buffer,
             0,
             bytemuck::cast_slice(&[Uniforms {
-                img_width: self.img_width,
-                img_height: self.img_height,
+                img_width: self.frame.width,
+                img_height: self.frame.height,
             }]),
         );
 
-        // Extract the wgpu buffer from the Burn tensor
-        let prim_tensor = resolve_to_cube_float(self.last_img.clone());
-        let img_res_handle = prim_tensor
-            .client
-            .get_resource(prim_tensor.handle)
-            .expect("Failed to get img resource");
+        let buffer_changed = res.reserve_upload_buffer(device, self.frame.pixels.len() as u64);
+        let img_buffer = res.upload_buffer.as_ref().expect("just reserved");
+        queue.write_buffer(img_buffer, 0, &self.frame.pixels);
 
-        // Create a new bind group with the current tensor buffer
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Splat Backbuffer Bind Group"),
-            layout: &res.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: res.uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: img_res_handle.resource().buffer.as_entire_binding(),
-                },
-            ],
-        });
+        if buffer_changed || res.bind_group.is_none() {
+            res.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Splat Backbuffer Bind Group"),
+                layout: &res.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: res.uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: img_buffer.as_entire_binding(),
+                    },
+                ],
+            }));
+        }
 
-        res.bind_group = Some(bind_group);
+        res.uploaded_pixels = Some(self.frame.pixels.clone());
         Vec::new()
     }
 
@@ -300,5 +357,21 @@ impl CallbackTrait for SplatBackbufferPainter {
         render_pass.set_pipeline(&res.pipeline);
         render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_upload;
+    use std::sync::Arc;
+
+    #[test]
+    fn uploads_only_newly_published_frames() {
+        let frame = Arc::new(vec![1, 2, 3, 4]);
+        assert!(needs_upload(None, &frame));
+        assert!(!needs_upload(Some(&frame), &frame.clone()));
+
+        let equal_pixels_from_new_render = Arc::new(vec![1, 2, 3, 4]);
+        assert!(needs_upload(Some(&frame), &equal_pixels_from_new_render));
     }
 }

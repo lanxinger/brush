@@ -35,5 +35,9 @@ while (true) {
 }
 ```
 
+Initialization is process-wide. Repeating `initExisting` with the same
+`GPUDevice` is idempotent; trying to replace an already-selected device throws
+instead of exposing buffers owned by a different device.
+
 `training.currentSplats().buffers()` gives you the live GPU buffers; see
 `web/src/main.ts` for an end-to-end renderer.

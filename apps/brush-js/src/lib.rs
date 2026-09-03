@@ -4,14 +4,22 @@
 
 use brush_process::message::{ProcessMessage, TrainMessage};
 use brush_process::slot::Slot;
-use brush_process::{DataSource, ProcessStream, burn_init_device, burn_init_setup, create_process};
+use brush_process::{
+    DataSource, ProcessStream, burn_init_setup, create_process, try_burn_init_device,
+};
 use brush_render::gaussian_splats::Splats;
 use serde::Serialize;
-use std::pin::Pin;
+use std::{cell::RefCell, pin::Pin};
 use tokio::sync::{Mutex, watch};
 use tokio_stream::StreamExt;
 use wasm_bindgen::prelude::*;
 use web_sys::js_sys;
+
+thread_local! {
+    // wgpu assigns a fresh Rust-side identifier every time a raw JS handle is
+    // wrapped, so compare the original `GPUDevice` objects for idempotence.
+    static HOST_DEVICE: RefCell<Option<JsValue>> = const { RefCell::new(None) };
+}
 
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug)]
@@ -253,7 +261,8 @@ impl BrushApp {
     /// triple. Use this when the host app already has a WebGPU device and
     /// wants Brush to train on the same one — splat buffers exposed via
     /// [`BrushSplats::buffers`] then bind directly into the host's render
-    /// pipelines without copies.
+    /// pipelines without copies. Repeating this with the same device is safe;
+    /// passing a different device after initialization returns an error.
     #[wasm_bindgen(js_name = initExisting)]
     pub fn init_existing(
         &self,
@@ -261,15 +270,29 @@ impl BrushApp {
         device: JsValue,
         queue: JsValue,
     ) -> Result<(), JsValue> {
+        if let Some(existing) = HOST_DEVICE.with(|registered| registered.borrow().clone()) {
+            return if js_sys::Object::is(&existing, &device) {
+                Ok(())
+            } else {
+                Err(JsValue::from_str(
+                    "Brush is already initialized with a different GPU device",
+                ))
+            };
+        }
+
+        let host_device = device.clone();
         let adapter = wgpu::webgpu_backend::WebAdapter::from_handle(adapter);
         let device = wgpu::webgpu_backend::WebDevice::from_handle(device);
         let queue = wgpu::webgpu_backend::WebQueue::from_handle(queue);
-        burn_init_device(
+        try_burn_init_device(
             wgpu::Adapter::from_webgpu(adapter),
             wgpu::Device::from_webgpu(device),
             wgpu::Queue::from_webgpu(queue),
-        );
-        Ok(())
+        )
+        .map(|_| {
+            HOST_DEVICE.with(|registered| *registered.borrow_mut() = Some(host_device));
+        })
+        .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
     /// Start training from a directory picked via `window.showDirectoryPicker()`.

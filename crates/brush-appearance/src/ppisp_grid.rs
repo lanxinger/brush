@@ -95,7 +95,7 @@ fn launch_fwd<R: CubeRuntime>(
     camera_idx: usize,
     payload: GridPayload,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let vignetting = contiguous(vignetting);
@@ -142,7 +142,7 @@ fn launch_bwd<R: CubeRuntime>(
     payload: GridPayload,
     subsample: GradSubsample,
 ) -> (CubeTensor<R>, CubeTensor<R>, CubeTensor<R>) {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
     let vignetting = contiguous(vignetting);

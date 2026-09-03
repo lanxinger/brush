@@ -7,9 +7,9 @@
 
 use crate::kernels::sh::{num_sh_coeffs, sh_basis, sh_color_component};
 use crate::kernels::types::ProjectUniforms;
-use burn_cubecl::cubecl;
-use burn_cubecl::cubecl::cube;
-use burn_cubecl::cubecl::prelude::*;
+use burn::cubecl;
+use burn::cubecl::cube;
+use burn::cubecl::prelude::*;
 
 pub const PLANE_SIZE: u32 = 32;
 pub const WG_SIZE: u32 = 256;

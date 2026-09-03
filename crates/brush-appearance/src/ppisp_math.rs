@@ -6,9 +6,9 @@
 //! Used by the per-frame/per-camera PPISP kernels.
 
 use brush_cube::Vec3A;
-use burn_cubecl::cubecl;
-use burn_cubecl::cubecl::cube;
-use burn_cubecl::cubecl::prelude::*;
+use burn::cubecl;
+use burn::cubecl::cube;
+use burn::cubecl::prelude::*;
 
 pub(crate) const LN2: f32 = core::f32::consts::LN_2;
 

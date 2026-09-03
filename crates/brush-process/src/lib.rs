@@ -17,19 +17,16 @@ pub const VERSION: &str = env!("BRUSH_VERSION");
 
 #[cfg(not(target_os = "ios"))]
 use burn_wgpu::graphics::AutoGraphicsApi;
-use burn_wgpu::{AutoCompiler, RuntimeOptions, WgpuDevice, graphics::GraphicsApi};
+use burn_wgpu::{RuntimeOptions, WgpuDevice, graphics::GraphicsApi};
 use wgpu::{Adapter, Device, Queue};
 
 use std::future::Future;
 use std::pin::{Pin, pin};
-use std::sync::LazyLock;
 
 use anyhow::Error;
 use async_fn_stream::{TryStreamEmitter, try_fn_stream};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use brush_vfs::SendNotWasm;
-use burn_cubecl::cubecl::Runtime;
-use burn_wgpu::WgpuRuntime;
 use tokio_stream::{Stream, StreamExt};
 
 // AutoGraphicsApi has no iOS selection arm and falls back to Vulkan. Apple
@@ -46,18 +43,67 @@ fn burn_options() -> RuntimeOptions {
     }
 }
 
-pub async fn burn_init_setup() -> WgpuDevice {
+/// Open the compute device.
+///
+/// Its own device, separate from anything the viewer owns, so training never
+/// contends with GUI work on the same queue. wgpu needs an explicit setup so
+/// the adapter and limits are chosen before any kernel runs.
+async fn open_device() -> RegisteredDevice {
     burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::DefaultDevice, burn_options())
         .await;
-    connect_device(WgpuDevice::DefaultDevice);
-    WgpuDevice::DefaultDevice
+    RegisteredDevice {
+        burn: WgpuDevice::DefaultDevice.into(),
+        host: None,
+    }
 }
 
-/// Initialize Burn with a wgpu setup the host already owns. Useful when
-/// integrating with an existing wgpu/WebGPU application that wants to share
-/// its device with Brush so tensor buffers can flow back into the host's
-/// render pipeline without copies.
-pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuDevice {
+/// Open the compute device now, rather than waiting for the first thing that
+/// needs it. Only worth calling to front-load the cost.
+pub async fn burn_init_setup() -> WgpuDevice {
+    registered_wgpu(DEVICE.get_or_init(open_device).await).clone()
+}
+
+/// Why a host-provided device could not become Brush's compute device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BurnInitDeviceError {
+    /// Another, different device was registered first.
+    AlreadyInitialized,
+    /// Another task is currently opening the compute device.
+    InitializationInProgress,
+}
+
+impl std::fmt::Display for BurnInitDeviceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyInitialized => {
+                f.write_str("Brush is already initialized with a different GPU device")
+            }
+            Self::InitializationInProgress => {
+                f.write_str("Brush GPU initialization is already in progress")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BurnInitDeviceError {}
+
+/// Register a wgpu setup the host already owns.
+///
+/// Repeating the call with the same [`Device`] is idempotent. A different
+/// device, or a call racing asynchronous initialization, returns an error so a
+/// host never mistakes buffers from another device for its own.
+pub fn try_burn_init_device(
+    adapter: Adapter,
+    device: Device,
+    queue: Queue,
+) -> Result<WgpuDevice, BurnInitDeviceError> {
+    if let Some(existing) = DEVICE.get() {
+        return registered_host(existing, &device);
+    }
+
+    let host_device = device.clone();
+
     let setup = burn_wgpu::WgpuSetup {
         instance: wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()), // unused... need to fix this in Burn.
         adapter,
@@ -66,8 +112,42 @@ pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuD
         backend: DefaultGraphicsApi::backend(),
     };
     let burn = burn_wgpu::init_device(setup, burn_options());
-    connect_device(burn.clone());
-    burn
+    let registered = RegisteredDevice {
+        burn: burn.clone().into(),
+        host: Some(host_device.clone()),
+    };
+
+    match DEVICE.set(registered) {
+        Ok(()) => Ok(burn),
+        Err(tokio::sync::SetError::AlreadyInitializedError(_)) => registered_host(
+            DEVICE
+                .get()
+                .expect("an initialized OnceCell must contain its value"),
+            &host_device,
+        ),
+        Err(tokio::sync::SetError::InitializingError(_)) => {
+            Err(BurnInitDeviceError::InitializationInProgress)
+        }
+    }
+}
+
+/// Register a host device with first-initializer-wins compatibility.
+///
+/// Hosts that must guarantee device identity should use
+/// [`try_burn_init_device`] and handle a conflicting prior initialization.
+pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuDevice {
+    match try_burn_init_device(adapter, device, queue) {
+        Ok(device) => device,
+        Err(BurnInitDeviceError::AlreadyInitialized) => registered_wgpu(
+            DEVICE
+                .get()
+                .expect("already-initialized device must be registered"),
+        )
+        .clone(),
+        Err(BurnInitDeviceError::InitializationInProgress) => {
+            panic!("Brush GPU initialization is already in progress")
+        }
+    }
 }
 
 use crate::{
@@ -89,28 +169,91 @@ pub struct RunningProcess {
 /// machine, so this is just the channel for `emit(msg).await`.
 pub(crate) type Emitter = TryStreamEmitter<ProcessMessage, Error>;
 
-use tokio::sync::watch;
+use tokio::sync::OnceCell;
 
-// Keep the most recently registered device. Hosts can initialize Brush before
-// they own a WebGPU device and then replace that setup with an existing device;
-// future processes must use the replacement rather than the first device seen.
-static DEVICE: LazyLock<watch::Sender<Option<WgpuDevice>>> =
-    LazyLock::new(|| watch::channel(None).0);
-
-pub(crate) fn connect_device(device: WgpuDevice) {
-    DEVICE.send_replace(Some(device));
+struct RegisteredDevice {
+    burn: burn::tensor::Device,
+    host: Option<Device>,
 }
 
-pub async fn wait_for_device() -> WgpuDevice {
-    let mut receiver = DEVICE.subscribe();
-    loop {
-        if let Some(device) = receiver.borrow_and_update().clone() {
-            return device;
+fn registered_wgpu(device: &RegisteredDevice) -> &WgpuDevice {
+    let burn::backend::DispatchDevice::Wgpu(device) = device.burn.as_dispatch() else {
+        unreachable!("the registered compute device is created by the wgpu backend")
+    };
+    device
+}
+
+fn host_matches<T: PartialEq>(registered: Option<&T>, requested: &T) -> bool {
+    registered.is_some_and(|registered| registered == requested)
+}
+
+fn registered_host(
+    registered: &RegisteredDevice,
+    requested: &Device,
+) -> Result<WgpuDevice, BurnInitDeviceError> {
+    if host_matches(registered.host.as_ref(), requested) {
+        Ok(registered_wgpu(registered).clone())
+    } else {
+        Err(BurnInitDeviceError::AlreadyInitialized)
+    }
+}
+
+/// Free cached GPU memory on whichever runtime the device belongs to.
+///
+/// `memory_cleanup` / `memory_usage` live on the cubecl client, which is
+/// runtime-specific, so this has to branch on the dispatch variant. Only wgpu
+/// is wired up today; another cubecl runtime would add an arm here.
+pub fn device_memory_cleanup(device: &burn::tensor::Device) {
+    use burn::backend::DispatchDevice;
+    use burn::cubecl::Runtime;
+    if let DispatchDevice::Wgpu(d) = device.as_dispatch() {
+        burn_wgpu::WgpuRuntime::<burn_wgpu::AutoCompiler>::client(d).memory_cleanup();
+    }
+}
+
+/// Bytes currently reserved by the runtime's memory pool, if it reports them.
+pub fn device_memory_usage(device: &burn::tensor::Device) -> Option<burn::cubecl::MemoryUsage> {
+    use burn::backend::DispatchDevice;
+    use burn::cubecl::Runtime;
+    match device.as_dispatch() {
+        DispatchDevice::Wgpu(d) => {
+            Some(burn_wgpu::WgpuRuntime::<burn_wgpu::AutoCompiler>::client(d).memory_usage())
         }
-        receiver
-            .changed()
-            .await
-            .expect("device registry must remain available");
+        // Autodiff wraps a device rather than being one; nothing to report.
+        DispatchDevice::Autodiff(_) => None,
+    }
+}
+
+static DEVICE: OnceCell<RegisteredDevice> = OnceCell::const_new();
+
+/// The compute device, opening it if this is the first call.
+pub async fn device() -> &'static burn::tensor::Device {
+    &DEVICE.get_or_init(open_device).await.burn
+}
+
+/// The compute device, but only if it is already open. For UI that wants to
+/// report on the device without causing it to be created.
+pub fn try_device() -> Option<&'static burn::tensor::Device> {
+    DEVICE.get().map(|registered| &registered.burn)
+}
+
+/// Wait for the compute device, opening the default device if necessary.
+///
+/// This preserves the former registration entry point while following the
+/// current lazy-initialization behavior.
+pub async fn wait_for_device() -> WgpuDevice {
+    burn_init_setup().await
+}
+
+#[cfg(test)]
+mod device_registration_tests {
+    use super::host_matches;
+
+    #[test]
+    fn host_identity_distinguishes_idempotence_from_conflicts() {
+        assert!(host_matches(Some(&7_u8), &7));
+        assert!(!host_matches(Some(&7_u8), &8));
+        assert!(!host_matches(None, &7));
     }
 }
 
@@ -235,11 +378,9 @@ async fn run_process<
         .await;
 
     if !is_training {
-        let wgpu_device = wait_for_device().await;
-        let device: burn::tensor::Device = wgpu_device.clone().into();
+        let device = device().await;
         let mut paths: Vec<_> = vfs.files_with_extension("ply").collect();
         alphanumeric_sort::sort_path_slice(&mut paths);
-        let client = WgpuRuntime::<AutoCompiler>::client(&wgpu_device);
         let total_frames = paths.len() as u32;
 
         for (frame, path) in paths.iter().enumerate() {
@@ -255,11 +396,11 @@ async fn run_process<
                 let message = message?;
 
                 let mode = message.meta.render_mode.unwrap_or(SplatRenderMode::Default);
-                let splats = message.data.into_splats(&device, mode);
+                let splats = message.data.into_splats(device, mode);
 
                 // As loading concatenates splats each time, memory usage tends to accumulate a lot
                 // over time. Clear out memory after each step to prevent this buildup.
-                client.memory_cleanup();
+                device_memory_cleanup(device);
 
                 // For the first frame of a new file, clear existing frames
                 if frame == 0 {

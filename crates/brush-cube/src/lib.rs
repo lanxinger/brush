@@ -20,16 +20,26 @@
 mod host;
 pub mod test_helpers;
 use burn_wgpu::CubeBackend;
-use burn_wgpu::Wgpu;
-use burn_wgpu::WgpuRuntime;
 pub use host::*;
 
-pub type MainBackend = Wgpu;
-pub type MainBackendBase = CubeBackend<WgpuRuntime>;
+/// The wgpu runtime.
+///
+/// The kernels themselves are generic over `R: CubeRuntime`, so a non-wgpu
+/// cubecl runtime can be added without touching them. This alias is only for
+/// the paths that genuinely need wgpu, such as handing a buffer to the viewer.
+pub type MainRuntime = burn_wgpu::WgpuRuntime;
 
-use burn_cubecl::cubecl;
-use burn_cubecl::cubecl::cube;
-use burn_cubecl::cubecl::prelude::*;
+/// Device for [`MainRuntime`].
+pub type MainDevice = <MainRuntime as burn::cubecl::Runtime>::Device;
+
+pub type MainBackendBase = CubeBackend<MainRuntime>;
+
+/// Fusion-wrapped wgpu backend, matching what burn's dispatch layer expects.
+pub type MainBackend = burn_wgpu::Wgpu;
+
+use burn::cubecl;
+use burn::cubecl::cube;
+use burn::cubecl::prelude::*;
 
 /// 3-component f32 vector, padded to 4 lanes — same shape as
 /// `glam::Vec3A`. See the module-level note on the cubecl-cpp
@@ -601,11 +611,11 @@ impl AtomicAddF32 for CasAtomicAdd {
 
 /// Whether the device supports native f32 atomic add (`HfAtomicAdd`) or
 /// needs the CAS fallback (`CasAtomicAdd`).
-pub fn supports_float_atomics<R: burn_cubecl::CubeRuntime>(
-    client: &burn_cubecl::cubecl::client::ComputeClient<R>,
+pub fn supports_float_atomics<R: CubeRuntime>(
+    client: &burn::cubecl::client::ComputeClient<R>,
 ) -> bool {
-    use burn_cubecl::cubecl::features::AtomicUsage;
-    use burn_cubecl::cubecl::ir::{ElemType, FloatKind, Type};
+    use burn::cubecl::features::AtomicUsage;
+    use burn::cubecl::ir::{ElemType, FloatKind, Type};
     client
         .properties()
         .atomic_type_usage(Type::atomic(Type::new(ElemType::Float(FloatKind::F32))))

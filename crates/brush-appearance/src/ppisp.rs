@@ -111,7 +111,7 @@ fn launch_fwd<R: CubeRuntime>(
     frame_idx: usize,
     stages: PpispStages,
 ) -> CubeTensor<R> {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let exposure = contiguous(exposure);
     let vignetting = contiguous(vignetting);
@@ -160,7 +160,7 @@ fn launch_bwd<R: CubeRuntime>(
     frame_idx: usize,
     stages: PpispStages,
 ) -> (CubeTensor<R>, CubeTensor<R>) {
-    use burn_cubecl::cubecl::prelude::CubeDim;
+    use burn::cubecl::prelude::CubeDim;
 
     let exposure = contiguous(exposure);
     let vignetting = contiguous(vignetting);

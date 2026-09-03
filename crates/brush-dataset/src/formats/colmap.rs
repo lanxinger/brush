@@ -554,6 +554,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn depth_png_is_never_loaded_as_the_image() {
+        let dir = tempfile::tempdir().unwrap();
+        write_test_dataset(dir.path()).await;
+
+        let depth_dir = dir.path().join("depth");
+        tokio::fs::create_dir_all(&depth_dir).await.unwrap();
+        for name in ["img0.png", "img1.png", "img2.png"] {
+            image::GrayImage::from_pixel(4, 3, image::Luma([200]))
+                .save(depth_dir.join(name))
+                .unwrap();
+        }
+
+        let result = load_test_dataset(dir.path(), None).await;
+        assert_eq!(result.dataset.train.views.len(), 3);
+
+        for view in result.dataset.train.views.iter() {
+            assert_eq!(
+                view.image.path().parent().and_then(Path::file_name),
+                Some(std::ffi::OsStr::new("images"))
+            );
+            let decoded = view.image.load().await.unwrap().to_rgb8();
+            assert_eq!(decoded.get_pixel(0, 0), &image::Rgb([10, 20, 30]));
+        }
+    }
+
+    #[tokio::test]
     async fn splits_eval_views() {
         let dir = tempfile::tempdir().unwrap();
         write_test_dataset(dir.path()).await;

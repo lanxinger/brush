@@ -10,18 +10,17 @@ use crate::{
     sh::sh_degree_from_coeffs,
     shaders,
 };
+use brush_cube::calc_cube_count_1d;
 use brush_cube::create_tensor;
-use brush_cube::{MainBackendBase, calc_cube_count_1d};
 use brush_prefix_sum::prefix_sum;
 use brush_sort::radix_argsort;
 use burn::backend::TensorMetadata;
 use burn::backend::ops::TransactionPrimitive;
 use burn::backend::ops::{FloatTensorOps, IntTensorOps, TransactionOps};
 use burn::backend::tensor::FloatTensor;
+use burn::cubecl::CubeDim;
 use burn::tensor::{DType, FloatDType, IntDType};
-use burn_cubecl::cubecl::CubeDim;
-use burn_cubecl::kernel::into_contiguous;
-use burn_wgpu::WgpuRuntime;
+use burn_cubecl::{CubeBackend, CubeRuntime, kernel::into_contiguous};
 use glam::{Vec3, uvec2};
 use kernels::types::RasterizeUniformsLaunch;
 use std::f32::consts::PI;
@@ -46,7 +45,7 @@ fn calc_tile_bounds_for_dims(
     )
 }
 
-impl SplatOps for MainBackendBase {
+impl<R: CubeRuntime> SplatOps for CubeBackend<R> {
     #[allow(clippy::too_many_arguments)]
     async fn render(
         camera: &Camera,
@@ -74,7 +73,7 @@ impl SplatOps for MainBackendBase {
     }
 }
 
-impl SplatRasterizerOps for MainBackendBase {
+impl<R: CubeRuntime> SplatRasterizerOps for CubeBackend<R> {
     #[allow(clippy::too_many_arguments)]
     async fn render_with_rasterizer(
         camera: &Camera,
@@ -186,7 +185,7 @@ impl SplatRasterizerOps for MainBackendBase {
                     background.y,
                     background.z,
                 );
-                kernels::rasterize::rasterize_kernel::launch::<WgpuRuntime>(
+                kernels::rasterize::rasterize_kernel::launch::<R>(
                     &client,
                     calc_cube_count_1d(num_tiles * tile_size, tile_size),
                     CubeDim::new_1d(tile_size),
@@ -269,7 +268,7 @@ impl SplatRasterizerOps for MainBackendBase {
 
             let uniforms = project_uniforms.to_launch_object();
 
-            kernels::project_forward::project_forward_kernel::launch::<WgpuRuntime>(
+            kernels::project_forward::project_forward_kernel::launch::<R>(
                 &client,
                 calc_cube_count_1d(
                     project_uniforms.total_splats,
@@ -349,7 +348,7 @@ impl SplatRasterizerOps for MainBackendBase {
         );
         tracing::trace_span!("ProjectVisible").in_scope(|| {
             let uniforms = project_uniforms.to_launch_object();
-            kernels::project_visible::project_visible_kernel::launch::<WgpuRuntime>(
+            kernels::project_visible::project_visible_kernel::launch::<R>(
                 &client,
                 calc_cube_count_1d(num_visible, kernels::project_visible::WG_SIZE),
                 CubeDim::new_1d(kernels::project_visible::WG_SIZE),
@@ -369,7 +368,7 @@ impl SplatRasterizerOps for MainBackendBase {
         let tile_id_from_isect = create_tensor([buffer_size], &device, DType::U32);
         let compact_gid_from_isect = create_tensor([buffer_size], &device, DType::U32);
         tracing::trace_span!("MapGaussiansToIntersect").in_scope(|| {
-            kernels::map_gaussians::map_gaussians_to_intersect_kernel::launch::<WgpuRuntime>(
+            kernels::map_gaussians::map_gaussians_to_intersect_kernel::launch::<R>(
                 &client,
                 calc_cube_count_1d(num_visible, kernels::map_gaussians::WG_SIZE),
                 CubeDim::new_1d(kernels::map_gaussians::WG_SIZE),
@@ -394,7 +393,7 @@ impl SplatRasterizerOps for MainBackendBase {
             IntDType::U32,
         );
         tracing::trace_span!("GetTileOffsets").in_scope(|| {
-            get_tile_offsets::launch::<WgpuRuntime>(
+            get_tile_offsets::launch::<R>(
                 &client,
                 calc_cube_count_1d(num_intersections, cube_dim.x * CHECKS_PER_ITER),
                 cube_dim,
@@ -456,7 +455,7 @@ impl SplatRasterizerOps for MainBackendBase {
                 background.y,
                 background.z,
             );
-            kernels::rasterize::rasterize_kernel::launch::<WgpuRuntime>(
+            kernels::rasterize::rasterize_kernel::launch::<R>(
                 &client,
                 calc_cube_count_1d(num_tiles * tile_size, tile_size),
                 CubeDim::new_1d(tile_size),
