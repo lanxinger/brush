@@ -200,6 +200,112 @@ async fn test_training_step() {
     assert!(final_splats.num_splats() > 0);
 }
 
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn imported_inner_splats_receive_training_gradients() {
+    use brush_render::bwd::lift_splats_to_autodiff;
+    use burn::tensor::Tensor;
+
+    let device = Device::from(brush_cube::test_helpers::test_device().await);
+    // Follow the importer: construct parameters before autodiff is enabled.
+    // Burn records these parameters as inactive, so Module::train() alone
+    // cannot replace the explicit training lift.
+    let splats = brush_serde::SplatData {
+        means: vec![0.15, -0.1, 0.0, -0.2, 0.12, 0.25],
+        rotations: None,
+        log_scales: Some(vec![-1.8, -2.0, -2.2, -2.0, -1.8, -2.1]),
+        sh_coeffs: Some(vec![0.3, 0.5, 0.7, 0.6, 0.4, 0.2]),
+        raw_opacities: Some(vec![0.0, 0.3]),
+    }
+    .into_splats(&device, SplatRenderMode::Default)
+    .with_min_scale(Tensor::from_floats([0.02, 0.03], &device));
+    assert!(!splats.transforms.val().is_require_grad());
+    assert!(!splats.sh_coeffs.val().is_require_grad());
+    assert!(!splats.raw_opacities.val().is_require_grad());
+    let parameter_ids = (
+        splats.transforms.id,
+        splats.sh_coeffs.id,
+        splats.raw_opacities.id,
+    );
+
+    let splats = lift_splats_to_autodiff(splats);
+    assert!(splats.transforms.val().is_require_grad());
+    assert!(splats.sh_coeffs.val().is_require_grad());
+    assert!(splats.raw_opacities.val().is_require_grad());
+    assert_eq!(
+        (
+            splats.transforms.id,
+            splats.sh_coeffs.id,
+            splats.raw_opacities.id
+        ),
+        parameter_ids,
+        "the training lift must preserve optimizer parameter identities"
+    );
+    let floor = splats.min_scale.as_ref().expect("scale floor preserved");
+    assert_eq!(
+        floor.device(),
+        device,
+        "the scale floor must stay on the inner device"
+    );
+    assert!(
+        !floor.is_require_grad(),
+        "the scale floor must remain frozen"
+    );
+
+    let camera = Camera::new(
+        Vec3::new(0.0, 0.0, -3.0),
+        Quat::IDENTITY,
+        0.6,
+        0.6,
+        glam::vec2(0.5, 0.5),
+        Pinhole,
+    );
+    let output = render_splats(splats.clone(), &camera, glam::uvec2(32, 32), Vec3::ZERO).await;
+    assert_eq!(
+        output.num_visible, 2,
+        "both imported splats must contribute"
+    );
+    let grads = output.img.sum().backward();
+
+    let gradients = [
+        (
+            "transforms",
+            splats
+                .transforms
+                .grad(&grads)
+                .expect("transforms gradient")
+                .reshape([20]),
+        ),
+        (
+            "SH coefficients",
+            splats
+                .sh_coeffs
+                .grad(&grads)
+                .expect("SH gradient")
+                .reshape([6]),
+        ),
+        (
+            "raw opacities",
+            splats.raw_opacities.grad(&grads).expect("opacity gradient"),
+        ),
+    ];
+    for (name, gradient) in gradients {
+        let values = gradient
+            .into_data_async()
+            .await
+            .expect("gradient readback")
+            .try_into_vec::<f32>()
+            .expect("float gradients");
+        assert!(
+            values.iter().all(|value| value.is_finite()),
+            "non-finite {name} gradient"
+        );
+        assert!(
+            values.iter().any(|value| *value != 0.0),
+            "missing {name} learning signal"
+        );
+    }
+}
+
 #[wasm_bindgen_test(unsupported = test)]
 fn test_batch_generation() {
     let batch = generate_test_batch((256, 128));

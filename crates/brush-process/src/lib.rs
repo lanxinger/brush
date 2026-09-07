@@ -8,6 +8,13 @@ pub mod train_stream;
 mod training_metrics;
 
 pub use brush_vfs::DataSource;
+pub type ProcessDevice = burn::tensor::Device;
+
+pub fn default_device() -> ProcessDevice {
+    try_device()
+        .cloned()
+        .unwrap_or_else(|| WgpuDevice::DefaultDevice.into())
+}
 
 /// Git-derived identifier for the source used to build Brush.
 pub const BUILD_ID: &str = env!("BRUSH_BUILD_ID");
@@ -59,8 +66,8 @@ async fn open_device() -> RegisteredDevice {
 
 /// Open the compute device now, rather than waiting for the first thing that
 /// needs it. Only worth calling to front-load the cost.
-pub async fn burn_init_setup() -> WgpuDevice {
-    registered_wgpu(DEVICE.get_or_init(open_device).await).clone()
+pub async fn burn_init_setup() -> ProcessDevice {
+    DEVICE.get_or_init(open_device).await.burn.clone()
 }
 
 /// Why a host-provided device could not become Brush's compute device.
@@ -97,7 +104,7 @@ pub fn try_burn_init_device(
     adapter: Adapter,
     device: Device,
     queue: Queue,
-) -> Result<WgpuDevice, BurnInitDeviceError> {
+) -> Result<ProcessDevice, BurnInitDeviceError> {
     if let Some(existing) = DEVICE.get() {
         return registered_host(existing, &device);
     }
@@ -111,9 +118,9 @@ pub fn try_burn_init_device(
         queue,
         backend: DefaultGraphicsApi::backend(),
     };
-    let burn = burn_wgpu::init_device(setup, burn_options());
+    let burn: ProcessDevice = burn_wgpu::init_device(setup, burn_options()).into();
     let registered = RegisteredDevice {
-        burn: burn.clone().into(),
+        burn: burn.clone(),
         host: Some(host_device.clone()),
     };
 
@@ -135,15 +142,14 @@ pub fn try_burn_init_device(
 ///
 /// Hosts that must guarantee device identity should use
 /// [`try_burn_init_device`] and handle a conflicting prior initialization.
-pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> WgpuDevice {
+pub fn burn_init_device(adapter: Adapter, device: Device, queue: Queue) -> ProcessDevice {
     match try_burn_init_device(adapter, device, queue) {
         Ok(device) => device,
-        Err(BurnInitDeviceError::AlreadyInitialized) => registered_wgpu(
-            DEVICE
-                .get()
-                .expect("already-initialized device must be registered"),
-        )
-        .clone(),
+        Err(BurnInitDeviceError::AlreadyInitialized) => DEVICE
+            .get()
+            .expect("already-initialized device must be registered")
+            .burn
+            .clone(),
         Err(BurnInitDeviceError::InitializationInProgress) => {
             panic!("Brush GPU initialization is already in progress")
         }
@@ -162,6 +168,10 @@ impl<T> ProcessStream for T where T: Stream<Item = Result<ProcessMessage, Error>
 pub struct RunningProcess {
     pub stream: Pin<Box<dyn ProcessStream>>,
     pub splat_view: Slot<Splats>,
+    /// Device selected at construction. For the legacy lazy [`create_process`]
+    /// entry point, a host registered before polling can supersede this hint.
+    /// [`create_process_with_device`] always uses this exact device.
+    pub device: ProcessDevice,
 }
 
 /// Convenience alias for the emitter `try_fn_stream` hands us inside
@@ -176,13 +186,6 @@ struct RegisteredDevice {
     host: Option<Device>,
 }
 
-fn registered_wgpu(device: &RegisteredDevice) -> &WgpuDevice {
-    let burn::backend::DispatchDevice::Wgpu(device) = device.burn.as_dispatch() else {
-        unreachable!("the registered compute device is created by the wgpu backend")
-    };
-    device
-}
-
 fn host_matches<T: PartialEq>(registered: Option<&T>, requested: &T) -> bool {
     registered.is_some_and(|registered| registered == requested)
 }
@@ -190,36 +193,27 @@ fn host_matches<T: PartialEq>(registered: Option<&T>, requested: &T) -> bool {
 fn registered_host(
     registered: &RegisteredDevice,
     requested: &Device,
-) -> Result<WgpuDevice, BurnInitDeviceError> {
+) -> Result<ProcessDevice, BurnInitDeviceError> {
     if host_matches(registered.host.as_ref(), requested) {
-        Ok(registered_wgpu(registered).clone())
+        Ok(registered.burn.clone())
     } else {
         Err(BurnInitDeviceError::AlreadyInitialized)
     }
 }
 
-/// Free cached GPU memory on whichever runtime the device belongs to.
-///
-/// `memory_cleanup` / `memory_usage` live on the cubecl client, which is
-/// runtime-specific, so this has to branch on the dispatch variant. Only wgpu
-/// is wired up today; another cubecl runtime would add an arm here.
-pub fn device_memory_cleanup(device: &burn::tensor::Device) {
+/// Free cached GPU memory on the runtime that owns this device.
+pub fn device_memory_cleanup(device: &ProcessDevice) {
     use burn::backend::DispatchDevice;
-    use burn::cubecl::Runtime;
-    if let DispatchDevice::Wgpu(d) = device.as_dispatch() {
-        burn_wgpu::WgpuRuntime::<burn_wgpu::AutoCompiler>::client(d).memory_cleanup();
+    if let DispatchDevice::Cube(d) = device.as_dispatch() {
+        d.client().memory_cleanup();
     }
 }
 
 /// Bytes currently reserved by the runtime's memory pool, if it reports them.
-pub fn device_memory_usage(device: &burn::tensor::Device) -> Option<burn::cubecl::MemoryUsage> {
+pub fn device_memory_usage(device: &ProcessDevice) -> Option<burn::cubecl::MemoryUsage> {
     use burn::backend::DispatchDevice;
-    use burn::cubecl::Runtime;
     match device.as_dispatch() {
-        DispatchDevice::Wgpu(d) => {
-            Some(burn_wgpu::WgpuRuntime::<burn_wgpu::AutoCompiler>::client(d).memory_usage())
-        }
-        // Autodiff wraps a device rather than being one; nothing to report.
+        DispatchDevice::Cube(d) => Some(d.client().memory_usage()),
         DispatchDevice::Autodiff(_) => None,
     }
 }
@@ -241,7 +235,7 @@ pub fn try_device() -> Option<&'static burn::tensor::Device> {
 ///
 /// This preserves the former registration entry point while following the
 /// current lazy-initialization behavior.
-pub async fn wait_for_device() -> WgpuDevice {
+pub async fn wait_for_device() -> ProcessDevice {
     burn_init_setup().await
 }
 
@@ -304,15 +298,40 @@ pub fn create_process<
     config_fn: Fun,
 ) -> RunningProcess {
     let (splat_tx, splat_view) = crate::slot::channel();
-
-    let stream =
-        try_fn_stream(
-            |emitter| async move { run_process(source, config_fn, &emitter, splat_tx).await },
-        );
+    let device_hint = default_device();
+    let stream = try_fn_stream(|emitter| async move {
+        // Preserve the legacy lazy entry point: a host may register its GPU
+        // after constructing the process but before driving the stream. This
+        // also completes async default setup before any tensor is allocated.
+        let device = device().await;
+        run_process(source, config_fn, &emitter, splat_tx, device).await
+    });
 
     RunningProcess {
         stream: Box::pin(stream),
         splat_view,
+        device: device_hint,
+    }
+}
+
+pub fn create_process_with_device<
+    Fun: FnOnce(crate::config::TrainStreamConfig) -> Fut + SendNotWasm + 'static,
+    Fut: Future<Output = Option<crate::config::TrainStreamConfig>> + SendNotWasm,
+>(
+    source: DataSource,
+    device: ProcessDevice,
+    config_fn: Fun,
+) -> RunningProcess {
+    let (splat_tx, splat_view) = crate::slot::channel();
+    let process_device = device.clone();
+    let stream = try_fn_stream(|emitter| async move {
+        run_process(source, config_fn, &emitter, splat_tx, &process_device).await
+    });
+
+    RunningProcess {
+        stream: Box::pin(stream),
+        splat_view,
+        device,
     }
 }
 
@@ -324,6 +343,7 @@ async fn run_process<
     config_fn: Fun,
     emitter: &Emitter,
     splat_view: SlotSender<Splats>,
+    device: &ProcessDevice,
 ) -> Result<(), Error> {
     log::info!("Starting process with source {source:?}");
     emitter.emit(ProcessMessage::NewProcess).await;
@@ -378,7 +398,6 @@ async fn run_process<
         .await;
 
     if !is_training {
-        let device = device().await;
         let mut paths: Vec<_> = vfs.files_with_extension("ply").collect();
         alphanumeric_sort::sort_path_slice(&mut paths);
         let total_frames = paths.len() as u32;
@@ -434,7 +453,7 @@ async fn run_process<
             log::info!("config_fn returned None — aborting before training");
             return Ok(());
         };
-        train_stream(vfs, config, emitter, splat_view).await?;
+        train_stream(vfs, config, emitter, splat_view, device).await?;
     };
 
     Ok(())

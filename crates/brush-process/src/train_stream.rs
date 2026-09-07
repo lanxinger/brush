@@ -1,7 +1,7 @@
 use crate::{
     Emitter,
     config::TrainStreamConfig,
-    device,
+    device_memory_cleanup, device_memory_usage,
     message::{ProcessMessage, TrainMessage},
     slot::SlotSender,
 };
@@ -35,6 +35,7 @@ pub(crate) async fn train_stream(
     train_stream_config: TrainStreamConfig,
     emitter: &Emitter,
     slot: SlotSender<Splats>,
+    device: &crate::ProcessDevice,
 ) -> anyhow::Result<()> {
     log::info!("Start of training stream");
 
@@ -51,11 +52,6 @@ pub(crate) async fn train_stream(
     let process_config = &train_stream_config.process_config;
     log::info!("Using seed {}", process_config.seed);
 
-    let device = device().await;
-    // Splats live on the inner (non-autodiff) device between steps; each
-    // training step lifts them via [`lift_splats_to_autodiff`] then strips
-    // back via `.valid()`. Going through `Module::train()` would hit
-    // burn-dispatch's `from_inner` checkpointing bug.
     device.seed(process_config.seed);
     let mut rng = rand::rngs::StdRng::seed_from_u64(process_config.seed);
 
@@ -181,7 +177,7 @@ pub(crate) async fn train_stream(
     emitter.emit(ProcessMessage::DoneLoading).await;
 
     // Start with memory cleared out.
-    crate::device_memory_cleanup(device);
+    device_memory_cleanup(device);
 
     let mut eval_scene = dataset.eval;
 
@@ -336,7 +332,7 @@ pub(crate) async fn train_stream(
             let after = splats.num_splats();
             log::info!("LOD {current_lod}/{lod_levels}: {before} -> {after} splats");
 
-            crate::device_memory_cleanup(device);
+            device_memory_cleanup(device);
 
             // Only rebuild the loader when the images actually changed size.
             // A rebuild throws away a warm batch cache and re-decodes the
@@ -377,6 +373,8 @@ pub(crate) async fn train_stream(
         // then strip back to inner so the viewer slot sees plain splats.
         // `step` immediately replaces `splats` with the returned value, so we
         // can move it here instead of cloning every iteration.
+        // Inner-created parameters have no active autodiff flag. Explicitly
+        // activate all learned splat parameters when starting each step.
         let diff_splats = brush_render::bwd::burn_glue::lift_splats_to_autodiff(splats);
         let compute_refine_weight = trainer.refinement_weight_needed(iter);
         let (new_diff_splats, stats) = trainer
@@ -408,7 +406,7 @@ pub(crate) async fn train_stream(
             splats = new_splats;
             // Cleanup the concrete training device after refinement releases
             // its temporary buffers.
-            crate::device_memory_cleanup(device);
+            device_memory_cleanup(device);
             refine_stats
         } else {
             RefineStats {
@@ -555,10 +553,7 @@ pub(crate) async fn train_stream(
             if rerun_config.rerun_enabled
                 && (iter.is_multiple_of(rerun_config.rerun_log_train_stats_every) || is_last_step)
             {
-                visualize.log_memory(
-                    iter,
-                    &crate::device_memory_usage(device).unwrap_or_default(),
-                )?;
+                visualize.log_memory(iter, &device_memory_usage(device).unwrap_or_default())?;
             }
 
             if refine.num_added > 0 {

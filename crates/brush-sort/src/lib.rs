@@ -1,4 +1,3 @@
-use burn_cubecl::CubeRuntime;
 mod kernels;
 
 use brush_cube::CubeCount;
@@ -13,11 +12,11 @@ use burn_wgpu::CubeTensor;
 use kernels::{BIN_COUNT, BLOCK_SIZE, WG};
 
 /// Perform a radix argsort on the input keys and values.
-pub fn radix_argsort<R: CubeRuntime>(
-    input_keys: CubeTensor<R>,
-    input_values: CubeTensor<R>,
+pub fn radix_argsort(
+    input_keys: CubeTensor,
+    input_values: CubeTensor,
     sorting_bits: u32,
-) -> (CubeTensor<R>, CubeTensor<R>) {
+) -> (CubeTensor, CubeTensor) {
     assert_eq!(
         input_keys.shape()[0],
         input_values.shape()[0],
@@ -61,7 +60,7 @@ pub fn radix_argsort<R: CubeRuntime>(
     for pass in 0..sorting_bits.div_ceil(4) {
         let count_buf = create_tensor([(max_needed_wgs as usize) * 16], &device, DType::I32);
 
-        kernels::sort_count_kernel::launch::<R>(
+        kernels::sort_count_kernel::launch(
             &client,
             num_wgs.clone(),
             cube_dim,
@@ -80,7 +79,7 @@ pub fn radix_argsort<R: CubeRuntime>(
             let reduced_buf_size = num_reduce_wgs_count.div_ceil(BLOCK_SIZE).max(1) * BLOCK_SIZE;
             let reduced_buf = create_tensor([reduced_buf_size as usize], &device, DType::I32);
 
-            kernels::sort_reduce_kernel::launch::<R>(
+            kernels::sort_reduce_kernel::launch(
                 &client,
                 num_reduce_wgs.clone(),
                 cube_dim,
@@ -88,7 +87,7 @@ pub fn radix_argsort<R: CubeRuntime>(
                 count_buf.clone().into_tensor_arg(),
                 reduced_buf.clone().into_tensor_arg(),
             );
-            kernels::sort_scan_kernel::launch::<R>(
+            kernels::sort_scan_kernel::launch(
                 &client,
                 CubeCount::Static(1, 1, 1),
                 cube_dim,
@@ -96,7 +95,7 @@ pub fn radix_argsort<R: CubeRuntime>(
                 reduced_buf.clone().into_tensor_arg(),
             );
 
-            kernels::sort_scan_add_kernel::launch::<R>(
+            kernels::sort_scan_add_kernel::launch(
                 &client,
                 num_reduce_wgs.clone(),
                 cube_dim,
@@ -109,7 +108,7 @@ pub fn radix_argsort<R: CubeRuntime>(
         let output_keys = create_tensor([max_n as usize], &device, cur_keys.dtype());
         let output_values = create_tensor([max_n as usize], &device, cur_vals.dtype());
 
-        kernels::sort_scatter_kernel::launch::<R>(
+        kernels::sort_scatter_kernel::launch(
             &client,
             num_wgs.clone(),
             cube_dim,
@@ -131,7 +130,7 @@ pub fn radix_argsort<R: CubeRuntime>(
 #[cfg(test)]
 mod tests {
     use crate::radix_argsort;
-    use brush_cube::{MainBackendBase, create_tensor_from_slice};
+    use brush_cube::{CubeDevice, MainBackendBase, create_tensor_from_slice};
     use burn::backend::TensorMetadata;
     use burn::backend::ops::IntTensorOps;
     use burn::tensor::DType;
@@ -143,7 +142,7 @@ mod tests {
     #[cfg(target_family = "wasm")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
-    async fn read_i32(tensor: CubeTensor<brush_cube::MainRuntime>) -> Vec<i32> {
+    async fn read_i32(tensor: CubeTensor) -> Vec<i32> {
         let data = MainBackendBase::int_into_data(tensor)
             .await
             .expect("readback");
@@ -158,11 +157,9 @@ mod tests {
 
     #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn empty_sort_returns_empty_inputs() {
-        let device = brush_cube::test_helpers::test_device().await;
-        let keys =
-            create_tensor_from_slice::<i32, brush_cube::MainRuntime>(&[], &device, DType::I32);
-        let values =
-            create_tensor_from_slice::<i32, brush_cube::MainRuntime>(&[], &device, DType::I32);
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
+        let keys = create_tensor_from_slice::<i32>(&[], &device, DType::I32);
+        let values = create_tensor_from_slice::<i32>(&[], &device, DType::I32);
 
         let (keys, values) = radix_argsort(keys, values, 32);
 
@@ -184,7 +181,7 @@ mod tests {
             })
             .collect();
         let values_inp: Vec<u32> = (0..LEN as u32).collect();
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
 
         for sorting_bits in SORTING_BITS {
             let effective_bits = sorting_bits.div_ceil(4) * 4;
@@ -245,7 +242,7 @@ mod tests {
 
     #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_sorting() {
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
 
         for i in 0..128 {
             let keys_inp = [
@@ -310,7 +307,7 @@ mod tests {
 
         let values_inp: Vec<_> = keys_inp.iter().map(|&x| x * 2 + 5).collect();
 
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
         let keys = create_tensor_from_slice(&keys_inp, &device, DType::I32);
         let values = create_tensor_from_slice(&values_inp, &device, DType::I32);
         let (ret_keys, ret_values) = radix_argsort(keys, values, 32);
@@ -346,7 +343,7 @@ mod tests {
             .collect();
         let values_inp: Vec<u32> = (0..NUM_ELEMENTS).map(|i| i as u32).collect();
 
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
         let keys = create_tensor_from_slice(&keys_inp, &device, DType::I32);
         let values = create_tensor_from_slice(&values_inp, &device, DType::I32);
         let (ret_keys, ret_values) = radix_argsort(keys, values, 32);
@@ -406,7 +403,7 @@ mod tests {
             expected_values[k as usize] = i as u32;
         }
 
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
         let keys = create_tensor_from_slice(&keys_inp, &device, DType::I32);
         let values = create_tensor_from_slice(&values_inp, &device, DType::I32);
         let (ret_keys, ret_values) = radix_argsort(keys, values, 32);

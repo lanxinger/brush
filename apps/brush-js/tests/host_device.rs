@@ -153,7 +153,7 @@ async fn host_device_owns_training_buffers_and_rejects_replacement() {
     let host = request_host_device()
         .await
         .expect("request host WebGPU device");
-    let app = BrushApp::new();
+    let mut app = BrushApp::new();
 
     app.init_existing(
         host.adapter.clone(),
@@ -170,6 +170,16 @@ async fn host_device_owns_training_buffers_and_rejects_replacement() {
     app.init()
         .await
         .expect("internal initialization after host registration");
+
+    // A second app initialized against the same host must carry that device
+    // into its own process as well.
+    let mut app = BrushApp::new();
+    app.init_existing(
+        host.adapter.clone(),
+        host.device.clone(),
+        host.queue.clone(),
+    )
+    .expect("reuse host device from a second app");
 
     let directory = JsFuture::from(create_brush_test_dataset(
         &bytes(include_bytes!(
