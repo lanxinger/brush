@@ -1,4 +1,3 @@
-use burn_cubecl::CubeRuntime;
 mod kernels;
 
 use brush_cube::calc_cube_count_1d;
@@ -8,7 +7,7 @@ use burn::cubecl::CubeDim;
 use burn_wgpu::CubeTensor;
 use kernels::THREADS_PER_GROUP;
 
-pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
+pub fn prefix_sum(input: CubeTensor) -> CubeTensor {
     assert!(input.is_contiguous(), "Please ensure input is contiguous");
 
     let num = input.shape()[0];
@@ -21,7 +20,7 @@ pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
 
     let cube_dim = CubeDim::new_1d(THREADS_PER_GROUP as u32);
 
-    kernels::prefix_sum_scan_kernel::launch::<R>(
+    kernels::prefix_sum_scan_kernel::launch(
         &client,
         calc_cube_count_1d(num as u32, THREADS_PER_GROUP as u32),
         cube_dim,
@@ -42,7 +41,7 @@ pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
         work_size.push(work_sz);
     }
 
-    kernels::prefix_sum_scan_sums_kernel::launch::<R>(
+    kernels::prefix_sum_scan_sums_kernel::launch(
         &client,
         calc_cube_count_1d(work_size[0] as u32, THREADS_PER_GROUP as u32),
         cube_dim,
@@ -51,7 +50,7 @@ pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
     );
 
     for l in 0..(group_buffer.len() - 1) {
-        kernels::prefix_sum_scan_sums_kernel::launch::<R>(
+        kernels::prefix_sum_scan_sums_kernel::launch(
             &client,
             calc_cube_count_1d(work_size[l + 1] as u32, THREADS_PER_GROUP as u32),
             cube_dim,
@@ -63,7 +62,7 @@ pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
     for l in (1..group_buffer.len()).rev() {
         let work_sz = work_size[l - 1];
 
-        kernels::prefix_sum_add_scanned_sums_kernel::launch::<R>(
+        kernels::prefix_sum_add_scanned_sums_kernel::launch(
             &client,
             calc_cube_count_1d(work_sz as u32, THREADS_PER_GROUP as u32),
             cube_dim,
@@ -72,7 +71,7 @@ pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
         );
     }
 
-    kernels::prefix_sum_add_scanned_sums_kernel::launch::<R>(
+    kernels::prefix_sum_add_scanned_sums_kernel::launch(
         &client,
         calc_cube_count_1d(
             (work_size[0] * THREADS_PER_GROUP) as u32,
@@ -89,7 +88,7 @@ pub fn prefix_sum<R: CubeRuntime>(input: CubeTensor<R>) -> CubeTensor<R> {
 #[cfg(test)]
 mod tests {
     use crate::prefix_sum;
-    use brush_cube::{MainBackendBase, create_tensor_from_slice};
+    use brush_cube::{CubeDevice, MainBackendBase, create_tensor_from_slice};
     use burn::backend::TensorMetadata;
     use burn::backend::ops::IntTensorOps;
     use burn::tensor::DType;
@@ -100,7 +99,7 @@ mod tests {
     #[cfg(target_family = "wasm")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
-    async fn read_i32(tensor: CubeTensor<brush_cube::MainRuntime>) -> Vec<i32> {
+    async fn read_i32(tensor: CubeTensor) -> Vec<i32> {
         let data = MainBackendBase::int_into_data(tensor)
             .await
             .expect("readback");
@@ -109,7 +108,7 @@ mod tests {
 
     #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_sum_tiny() {
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
         let keys = create_tensor_from_slice(&[1i32, 1, 1, 1], &device, DType::I32);
         let summed = read_i32(prefix_sum(keys)).await;
         assert_eq!(summed.len(), 4);
@@ -120,7 +119,7 @@ mod tests {
     async fn test_workgroup_multiple() {
         const ITERS: usize = 1024;
         let data: Vec<i32> = (0..ITERS).map(|i| 90 + i as i32).collect();
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
         let keys = create_tensor_from_slice(&data, &device, DType::I32);
         let summed = read_i32(prefix_sum(keys)).await;
         let prefix_sum_ref: Vec<_> = data
@@ -137,16 +136,15 @@ mod tests {
 
     #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_empty() {
-        let device = brush_cube::test_helpers::test_device().await;
-        let keys =
-            create_tensor_from_slice::<i32, brush_cube::MainRuntime>(&[], &device, DType::I32);
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
+        let keys = create_tensor_from_slice::<i32>(&[], &device, DType::I32);
         let summed = prefix_sum(keys);
         assert_eq!(summed.shape()[0], 0);
     }
 
     #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_workgroup_boundaries() {
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
 
         for len in [255usize, 256, 257] {
             let data: Vec<i32> = (0..len).map(|i| (i % 7) as i32).collect();
@@ -175,7 +173,7 @@ mod tests {
             data.push(30965);
         }
 
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
         let keys = create_tensor_from_slice(&data, &device, DType::I32);
         let summed = read_i32(prefix_sum(keys)).await;
 
@@ -200,7 +198,7 @@ mod tests {
         // Use small values to avoid overflow in prefix sum
         let data: Vec<i32> = (0..NUM_ELEMENTS).map(|i| (i % 100) as i32).collect();
 
-        let device = brush_cube::test_helpers::test_device().await;
+        let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
         let keys = create_tensor_from_slice(&data, &device, DType::I32);
         let summed_slice = read_i32(prefix_sum(keys)).await;
 

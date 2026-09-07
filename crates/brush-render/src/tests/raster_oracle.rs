@@ -10,12 +10,12 @@ use crate::{
     gaussian_splats::{RasterPass, Rasterizer, SplatRenderMode},
     kernels::camera_model::CameraModel,
 };
-use brush_cube::{MainBackendBase, Runtime};
+use brush_cube::MainBackendBase;
 use burn::{
     backend::{TensorMetadata, ops::FloatTensorOps},
     tensor::{DType, TensorData},
 };
-use burn_wgpu::{CubeTensor, WgpuDevice, WgpuRuntime};
+use burn_cubecl::{CubeDevice, tensor::CubeTensor};
 use glam::{UVec2, Vec3};
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -135,12 +135,8 @@ fn oracle_matches_hard_and_smooth_cutoff_definitions() {
     );
 }
 
-fn cube_tensor<const D: usize>(
-    device: &WgpuDevice,
-    shape: [usize; D],
-    data: &[f32],
-) -> CubeTensor<WgpuRuntime> {
-    let client = WgpuRuntime::client(device);
+fn cube_tensor<const D: usize>(device: &CubeDevice, shape: [usize; D], data: &[f32]) -> CubeTensor {
+    let client = device.client();
     let handle = client.create_from_slice(bytemuck::cast_slice(data));
     CubeTensor::new_contiguous(
         client,
@@ -151,7 +147,7 @@ fn cube_tensor<const D: usize>(
     )
 }
 
-async fn read_f32(tensor: CubeTensor<WgpuRuntime>) -> Vec<f32> {
+async fn read_f32(tensor: CubeTensor) -> Vec<f32> {
     let data: TensorData = MainBackendBase::float_into_data(tensor)
         .await
         .expect("readback");
@@ -163,7 +159,7 @@ async fn render_test_scene(
     pass: RasterPass,
     img_size: UVec2,
 ) -> (Vec<f32>, Vec<f32>, u32, [usize; 3]) {
-    let device = brush_cube::test_helpers::test_device().await;
+    let device = CubeDevice::Wgpu(brush_cube::test_helpers::test_device().await);
     let camera = Camera::new(
         glam::vec3(0.0, 0.0, -3.0),
         glam::Quat::IDENTITY,

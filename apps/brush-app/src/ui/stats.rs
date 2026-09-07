@@ -237,9 +237,7 @@ impl AppPane for StatsPanel {
                 .is_none_or(|sample| sample.elapsed() >= MEMORY_SAMPLE_INTERVAL)
             {
                 self.last_memory_sample = Some(Instant::now());
-                if let Some(memory) =
-                    brush_process::try_device().and_then(brush_process::device_memory_usage)
-                {
+                if let Some(memory) = process.device_memory_usage() {
                     self.memory_stats = Some(MemoryStats {
                         bytes_in_use: memory.bytes_in_use,
                         bytes_reserved: memory.bytes_reserved,

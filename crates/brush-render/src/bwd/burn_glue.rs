@@ -27,9 +27,9 @@ use burn::{
     module::Param,
     tensor::{DType, Gradients as TensorGradients, Int, Shape, Tensor},
 };
-use burn_cubecl::{CubeBackend, CubeRuntime, fusion::FusionCubeRuntime};
+use burn_cubecl::{CubeBackend, fusion::FusionCubeRuntime};
 use burn_fusion::{
-    Fusion, FusionHandle,
+    ExecutionError, Fusion, FusionHandle,
     stream::{Operation, StreamId},
 };
 use burn_ir::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
@@ -442,9 +442,8 @@ impl TrainingSplatOutputDiff {
     }
 }
 
-/// Equivalent to `Module::train()` for [`Splats`], routing through
-/// `lift_to_autodiff` so the autodiff `checkpointing` field is set. Use this
-/// instead of `splats.train()` until upstream burn-dispatch fixes `from_inner`.
+/// Enable autodiff on trainable splat parameters while preserving parameter
+/// identities and the frozen scale floor.
 pub fn lift_splats_to_autodiff(splats: Splats) -> Splats {
     let mip = splats.render_mip;
     let min_scale = splats.min_scale.clone();
@@ -715,21 +714,21 @@ async fn render_splats_with_pass_and_refine_weight(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rasterize_bwd_fusion<R: CubeRuntime>(
-    out_img: FloatTensor<Fusion<CubeBackend<R>>>,
-    projected_splats: FloatTensor<Fusion<CubeBackend<R>>>,
-    compact_gid_from_isect: IntTensor<Fusion<CubeBackend<R>>>,
-    tile_offsets: IntTensor<Fusion<CubeBackend<R>>>,
+fn rasterize_bwd_fusion(
+    out_img: FloatTensor<Fusion<CubeBackend>>,
+    projected_splats: FloatTensor<Fusion<CubeBackend>>,
+    compact_gid_from_isect: IntTensor<Fusion<CubeBackend>>,
+    tile_offsets: IntTensor<Fusion<CubeBackend>>,
     background: Vec3,
     img_size: glam::UVec2,
-    v_output: FloatTensor<Fusion<CubeBackend<R>>>,
+    v_output: FloatTensor<Fusion<CubeBackend>>,
     rasterizer: Rasterizer,
     smooth_cutoff: bool,
     compute_refine_weight: bool,
     trusted_forward: bool,
-) -> RasterizeGrads<Fusion<CubeBackend<R>>> {
+) -> RasterizeGrads<Fusion<CubeBackend>> {
     #[derive(Debug)]
-    struct CustomOp<R: CubeRuntime> {
+    struct CustomOp {
         desc: CustomOpIr,
         background: Vec3,
         img_size: glam::UVec2,
@@ -737,11 +736,13 @@ fn rasterize_bwd_fusion<R: CubeRuntime>(
         smooth_cutoff: bool,
         compute_refine_weight: bool,
         trusted_forward: bool,
-        _runtime: core::marker::PhantomData<R>,
     }
 
-    impl<R: CubeRuntime> Operation<FusionCubeRuntime<R>> for CustomOp<R> {
-        fn execute(&self, h: &mut HandleContainer<FusionHandle<FusionCubeRuntime<R>>>) {
+    impl Operation<FusionCubeRuntime> for CustomOp {
+        fn execute(
+            &self,
+            h: &mut HandleContainer<FusionHandle<FusionCubeRuntime>>,
+        ) -> Result<(), ExecutionError> {
             let (inputs, outputs) = self.desc.as_fixed();
 
             let [
@@ -755,35 +756,36 @@ fn rasterize_bwd_fusion<R: CubeRuntime>(
             let [v_combined] = outputs;
 
             let grads = if self.trusted_forward {
-                <CubeBackend<R> as InternalSplatBwdOps>::rasterize_bwd_from_forward(
+                <CubeBackend as InternalSplatBwdOps>::rasterize_bwd_from_forward(
                     ForwardRasterBackward::new(
-                        h.get_float_tensor::<CubeBackend<R>>(out_img),
-                        h.get_float_tensor::<CubeBackend<R>>(projected_splats),
-                        h.get_int_tensor::<CubeBackend<R>>(compact_gid_from_isect),
-                        h.get_int_tensor::<CubeBackend<R>>(tile_offsets),
+                        h.get_float_tensor::<CubeBackend>(out_img),
+                        h.get_float_tensor::<CubeBackend>(projected_splats),
+                        h.get_int_tensor::<CubeBackend>(compact_gid_from_isect),
+                        h.get_int_tensor::<CubeBackend>(tile_offsets),
                         self.background,
                         self.img_size,
-                        h.get_float_tensor::<CubeBackend<R>>(v_output),
+                        h.get_float_tensor::<CubeBackend>(v_output),
                         self.rasterizer,
                         self.smooth_cutoff,
                         self.compute_refine_weight,
                     ),
                 )
             } else {
-                <CubeBackend<R> as SplatBwdOps>::rasterize_bwd_with_refine_weight(
-                    h.get_float_tensor::<CubeBackend<R>>(out_img),
-                    h.get_float_tensor::<CubeBackend<R>>(projected_splats),
-                    h.get_int_tensor::<CubeBackend<R>>(compact_gid_from_isect),
-                    h.get_int_tensor::<CubeBackend<R>>(tile_offsets),
+                <CubeBackend as SplatBwdOps>::rasterize_bwd_with_refine_weight(
+                    h.get_float_tensor::<CubeBackend>(out_img),
+                    h.get_float_tensor::<CubeBackend>(projected_splats),
+                    h.get_int_tensor::<CubeBackend>(compact_gid_from_isect),
+                    h.get_int_tensor::<CubeBackend>(tile_offsets),
                     self.background,
                     self.img_size,
-                    h.get_float_tensor::<CubeBackend<R>>(v_output),
+                    h.get_float_tensor::<CubeBackend>(v_output),
                     self.smooth_cutoff,
                     self.compute_refine_weight,
                 )
             };
 
-            h.register_float_tensor::<CubeBackend<R>>(&v_combined.id, grads.v_combined);
+            h.register_float_tensor::<CubeBackend>(&v_combined.id, grads.v_combined);
+            Ok(())
         }
     }
 
@@ -813,7 +815,7 @@ fn rasterize_bwd_fusion<R: CubeRuntime>(
         .register(
             StreamId::current(),
             OperationIr::Custom(desc.clone()),
-            CustomOp::<R> {
+            CustomOp {
                 desc,
                 background,
                 img_size,
@@ -821,7 +823,6 @@ fn rasterize_bwd_fusion<R: CubeRuntime>(
                 smooth_cutoff,
                 compute_refine_weight,
                 trusted_forward,
-                _runtime: core::marker::PhantomData,
             },
         )
         .outputs();
@@ -927,7 +928,7 @@ impl<B: Backend + SplatOps + InternalSplatBwdOps, C: CheckpointStrategy> SplatOp
     }
 }
 
-impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
+impl SplatBwdOps for Fusion<CubeBackend> {
     #[allow(clippy::too_many_arguments)]
     fn rasterize_bwd(
         out_img: FloatTensor<Self>,
@@ -994,15 +995,17 @@ impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
         // The screen-area regulariser only acts in the backward kernel, so we
         // stamp the weight onto the uniforms here rather than in the forward.
         #[derive(Debug)]
-        struct CustomOp<R: CubeRuntime> {
+        struct CustomOp {
             desc: CustomOpIr,
             render_mode: SplatRenderMode,
             project_uniforms: ProjectUniforms,
-            _runtime: core::marker::PhantomData<R>,
         }
 
-        impl<R: CubeRuntime> Operation<FusionCubeRuntime<R>> for CustomOp<R> {
-            fn execute(&self, h: &mut HandleContainer<FusionHandle<FusionCubeRuntime<R>>>) {
+        impl Operation<FusionCubeRuntime> for CustomOp {
+            fn execute(
+                &self,
+                h: &mut HandleContainer<FusionHandle<FusionCubeRuntime>>,
+            ) -> Result<(), ExecutionError> {
                 let (inputs, outputs) = self.desc.as_fixed();
 
                 let [
@@ -1015,23 +1018,21 @@ impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
 
                 let [v_transforms, v_coeffs, v_raw_opac, v_refine_weight] = outputs;
 
-                let grads = <CubeBackend<R> as SplatBwdOps>::project_bwd(
-                    h.get_float_tensor::<CubeBackend<R>>(transforms),
-                    h.get_float_tensor::<CubeBackend<R>>(sh_coeffs),
-                    h.get_float_tensor::<CubeBackend<R>>(raw_opac),
-                    h.get_int_tensor::<CubeBackend<R>>(global_from_compact_gid),
+                let grads = <CubeBackend as SplatBwdOps>::project_bwd(
+                    h.get_float_tensor::<CubeBackend>(transforms),
+                    h.get_float_tensor::<CubeBackend>(sh_coeffs),
+                    h.get_float_tensor::<CubeBackend>(raw_opac),
+                    h.get_int_tensor::<CubeBackend>(global_from_compact_gid),
                     self.project_uniforms,
                     self.render_mode,
-                    h.get_float_tensor::<CubeBackend<R>>(v_combined_in),
+                    h.get_float_tensor::<CubeBackend>(v_combined_in),
                 );
 
-                h.register_float_tensor::<CubeBackend<R>>(&v_transforms.id, grads.v_transforms);
-                h.register_float_tensor::<CubeBackend<R>>(&v_coeffs.id, grads.v_coeffs);
-                h.register_float_tensor::<CubeBackend<R>>(&v_raw_opac.id, grads.v_raw_opac);
-                h.register_float_tensor::<CubeBackend<R>>(
-                    &v_refine_weight.id,
-                    grads.v_refine_weight,
-                );
+                h.register_float_tensor::<CubeBackend>(&v_transforms.id, grads.v_transforms);
+                h.register_float_tensor::<CubeBackend>(&v_coeffs.id, grads.v_coeffs);
+                h.register_float_tensor::<CubeBackend>(&v_raw_opac.id, grads.v_raw_opac);
+                h.register_float_tensor::<CubeBackend>(&v_refine_weight.id, grads.v_refine_weight);
+                Ok(())
             }
         }
 
@@ -1072,11 +1073,10 @@ impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
                 .register(
                     stream,
                     OperationIr::Custom(desc.clone()),
-                    CustomOp::<R> {
+                    CustomOp {
                         desc,
                         render_mode,
                         project_uniforms,
-                        _runtime: core::marker::PhantomData,
                     },
                 )
                 .outputs()
@@ -1103,15 +1103,17 @@ impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
         v_combined: FloatTensor<Self>,
     ) -> DeferredSplatGrads<Self> {
         #[derive(Debug)]
-        struct CustomOp<R: CubeRuntime> {
+        struct CustomOp {
             desc: CustomOpIr,
             render_mode: SplatRenderMode,
             project_uniforms: ProjectUniforms,
-            _runtime: core::marker::PhantomData<R>,
         }
 
-        impl<R: CubeRuntime> Operation<FusionCubeRuntime<R>> for CustomOp<R> {
-            fn execute(&self, h: &mut HandleContainer<FusionHandle<FusionCubeRuntime<R>>>) {
+        impl Operation<FusionCubeRuntime> for CustomOp {
+            fn execute(
+                &self,
+                h: &mut HandleContainer<FusionHandle<FusionCubeRuntime>>,
+            ) -> Result<(), ExecutionError> {
                 let (inputs, outputs) = self.desc.as_fixed();
                 let [
                     transforms,
@@ -1122,22 +1124,20 @@ impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
                 ] = inputs;
                 let [v_transforms, v_raw_opac, v_refine_weight] = outputs;
 
-                let grads = <CubeBackend<R> as SplatBwdOps>::project_bwd_deferred_sh(
-                    h.get_float_tensor::<CubeBackend<R>>(transforms),
-                    h.get_float_tensor::<CubeBackend<R>>(sh_coeffs),
-                    h.get_float_tensor::<CubeBackend<R>>(raw_opac),
-                    h.get_int_tensor::<CubeBackend<R>>(global_from_compact_gid),
+                let grads = <CubeBackend as SplatBwdOps>::project_bwd_deferred_sh(
+                    h.get_float_tensor::<CubeBackend>(transforms),
+                    h.get_float_tensor::<CubeBackend>(sh_coeffs),
+                    h.get_float_tensor::<CubeBackend>(raw_opac),
+                    h.get_int_tensor::<CubeBackend>(global_from_compact_gid),
                     self.project_uniforms,
                     self.render_mode,
-                    h.get_float_tensor::<CubeBackend<R>>(v_combined),
+                    h.get_float_tensor::<CubeBackend>(v_combined),
                 );
 
-                h.register_float_tensor::<CubeBackend<R>>(&v_transforms.id, grads.v_transforms);
-                h.register_float_tensor::<CubeBackend<R>>(&v_raw_opac.id, grads.v_raw_opac);
-                h.register_float_tensor::<CubeBackend<R>>(
-                    &v_refine_weight.id,
-                    grads.v_refine_weight,
-                );
+                h.register_float_tensor::<CubeBackend>(&v_transforms.id, grads.v_transforms);
+                h.register_float_tensor::<CubeBackend>(&v_raw_opac.id, grads.v_raw_opac);
+                h.register_float_tensor::<CubeBackend>(&v_refine_weight.id, grads.v_refine_weight);
+                Ok(())
             }
         }
 
@@ -1174,11 +1174,10 @@ impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
             .register(
                 StreamId::current(),
                 OperationIr::Custom(desc.clone()),
-                CustomOp::<R> {
+                CustomOp {
                     desc,
                     render_mode,
                     project_uniforms,
-                    _runtime: core::marker::PhantomData,
                 },
             )
             .outputs();
@@ -1191,7 +1190,7 @@ impl<R: CubeRuntime> SplatBwdOps for Fusion<CubeBackend<R>> {
     }
 }
 
-impl<R: CubeRuntime> InternalSplatBwdOps for Fusion<CubeBackend<R>> {
+impl InternalSplatBwdOps for Fusion<CubeBackend> {
     fn rasterize_bwd_from_forward(input: ForwardRasterBackward<Self>) -> RasterizeGrads<Self> {
         let (
             out_img,

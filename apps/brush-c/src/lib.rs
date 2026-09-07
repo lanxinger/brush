@@ -5,7 +5,7 @@ use brush_process::DataSource;
 use brush_process::burn_init_setup;
 use brush_process::config::TrainStreamConfig;
 use brush_process::message::TrainMessage;
-use brush_process::{create_process, message::ProcessMessage};
+use brush_process::{create_process_with_device, message::ProcessMessage};
 use brush_render::AlphaMode;
 use std::convert::TryFrom;
 use std::ffi::{CStr, c_char, c_void};
@@ -141,7 +141,7 @@ unsafe fn base_train_stream_config(
 pub type ProgressCallback =
     extern "C" fn(progress_message: ProgressMessage, user_data: *mut c_void);
 
-static SETUP: OnceCell<()> = OnceCell::const_new();
+static DEVICE: OnceCell<brush_process::ProcessDevice> = OnceCell::const_new();
 
 fn run_training(
     dataset_path: String,
@@ -150,18 +150,15 @@ fn run_training(
     user_data: *mut c_void,
 ) -> TrainExitCode {
     let source = DataSource::Path(dataset_path);
-    let mut process = create_process(source, async move |_| Some(process_args));
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("Failed to create tokio runtime")
         .block_on(async {
-            SETUP
-                .get_or_init(async move || {
-                    burn_init_setup().await;
-                })
-                .await;
+            let device = DEVICE.get_or_init(burn_init_setup).await.clone();
+            let mut process =
+                create_process_with_device(source, device, async move |_| Some(process_args));
 
             while let Some(message_result) = process.stream.next().await {
                 match message_result {

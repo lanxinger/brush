@@ -22,19 +22,8 @@ pub mod test_helpers;
 use burn_wgpu::CubeBackend;
 pub use host::*;
 
-/// The wgpu runtime.
-///
-/// The kernels themselves are generic over `R: CubeRuntime`, so a non-wgpu
-/// cubecl runtime can be added without touching them. This alias is only for
-/// the paths that genuinely need wgpu, such as handing a buffer to the viewer.
-pub type MainRuntime = burn_wgpu::WgpuRuntime;
-
-/// Device for [`MainRuntime`].
-pub type MainDevice = <MainRuntime as burn::cubecl::Runtime>::Device;
-
-pub type MainBackendBase = CubeBackend<MainRuntime>;
-
-/// Fusion-wrapped wgpu backend, matching what burn's dispatch layer expects.
+pub type MainDevice = burn_wgpu::WgpuDevice;
+pub type MainBackendBase = CubeBackend;
 pub type MainBackend = burn_wgpu::Wgpu;
 
 use burn::cubecl;
@@ -611,9 +600,7 @@ impl AtomicAddF32 for CasAtomicAdd {
 
 /// Whether the device supports native f32 atomic add (`HfAtomicAdd`) or
 /// needs the CAS fallback (`CasAtomicAdd`).
-pub fn supports_float_atomics<R: CubeRuntime>(
-    client: &burn::cubecl::client::ComputeClient<R>,
-) -> bool {
+pub fn supports_float_atomics(client: &burn::cubecl::client::Client) -> bool {
     use burn::cubecl::features::AtomicUsage;
     use burn::cubecl::ir::{ElemType, FloatKind, Type};
     client

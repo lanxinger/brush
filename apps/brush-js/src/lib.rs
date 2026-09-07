@@ -5,7 +5,8 @@
 use brush_process::message::{ProcessMessage, TrainMessage};
 use brush_process::slot::Slot;
 use brush_process::{
-    DataSource, ProcessStream, burn_init_setup, create_process, try_burn_init_device,
+    DataSource, ProcessDevice, ProcessStream, burn_init_setup, create_process_with_device,
+    default_device, try_burn_init_device,
 };
 use brush_render::gaussian_splats::Splats;
 use serde::Serialize;
@@ -227,7 +228,9 @@ impl BrushSplats {
 /// per-training-run — each [`Self::start_training_from_directory`] call
 /// returns a fresh [`Training`] you drive yourself.
 #[wasm_bindgen]
-pub struct BrushApp;
+pub struct BrushApp {
+    device_override: Option<ProcessDevice>,
+}
 
 #[wasm_bindgen]
 impl BrushApp {
@@ -248,7 +251,9 @@ impl BrushApp {
         LOGGER_INIT.call_once(|| {
             wasm_logger::init(wasm_logger::Config::new(log::Level::Info));
         });
-        Self
+        Self {
+            device_override: None,
+        }
     }
 
     /// Initialize Brush with its own internal `GPUDevice`.
@@ -265,13 +270,14 @@ impl BrushApp {
     /// passing a different device after initialization returns an error.
     #[wasm_bindgen(js_name = initExisting)]
     pub fn init_existing(
-        &self,
+        &mut self,
         adapter: JsValue,
         device: JsValue,
         queue: JsValue,
     ) -> Result<(), JsValue> {
         if let Some(existing) = HOST_DEVICE.with(|registered| registered.borrow().clone()) {
             return if js_sys::Object::is(&existing, &device) {
+                self.device_override = brush_process::try_device().cloned();
                 Ok(())
             } else {
                 Err(JsValue::from_str(
@@ -289,7 +295,8 @@ impl BrushApp {
             wgpu::Device::from_webgpu(device),
             wgpu::Queue::from_webgpu(queue),
         )
-        .map(|_| {
+        .map(|device| {
+            self.device_override = Some(device);
             HOST_DEVICE.with(|registered| *registered.borrow_mut() = Some(host_device));
         })
         .map_err(|error| JsValue::from_str(&error.to_string()))
@@ -320,7 +327,8 @@ impl BrushApp {
         let dir = rrfd::wasm::DirectoryHandle::from_handle(handle);
         let source = DataSource::PickedDirectory(dir, display_name);
 
-        let process = create_process(source, async move |init| {
+        let device = self.device_override.clone().unwrap_or_else(default_device);
+        let process = create_process_with_device(source, device, async move |init| {
             bridge_config_callback(config_fn, init).await
         });
 
@@ -501,7 +509,12 @@ async fn bridge_config_callback(
 /// supports anyway).
 fn tensor_buffer_js<const D: usize>(tensor: burn::tensor::Tensor<D>) -> Option<JsValue> {
     let cube_tensor = brush_render::burn_glue::resolve_to_cube_float::<D>(tensor);
-    let resource = cube_tensor.client.get_resource(cube_tensor.handle).ok()?;
+    let resource = cube_tensor
+        .client
+        .get_resource::<burn::cubecl::wgpu::WgpuServer<burn::cubecl::wgpu::AutoCompiler>>(
+            cube_tensor.handle,
+        )
+        .ok()?;
     // Upstream wgpu 30 returns the raw `web_sys::GpuBuffer` handle directly.
     resource
         .resource()

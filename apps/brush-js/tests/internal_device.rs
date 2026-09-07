@@ -10,7 +10,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
 async fn internal_initialization_rejects_a_later_host_device() {
-    let app = BrushApp::new();
+    let mut app = BrushApp::new();
     app.init().await.expect("initialize Brush-owned device");
     app.init().await.expect("repeat Brush-owned initialization");
 

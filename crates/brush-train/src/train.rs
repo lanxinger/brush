@@ -396,10 +396,8 @@ impl SplatTrainer {
         // GT lives on the GPU as packed `[H, W]` u32 (RGBA u8). All mixing
         // (bg compositing, alpha matching, mask) is folded into the loss
         // kernels; no f32 GT image is ever materialised here.
-        // GT is pure data — never differentiated. Build it on the inner
-        // backend so it doesn't inherit the autodiff device's residual
-        // checkpointing flag (the LPIPS `unpack_gt_rgb` path, via
-        // `unwrap_wgpu_int`, expects a clean Wgpu tensor).
+        // GT is pure data. Keep it on the inner device so loss and LPIPS
+        // kernels receive a tensor without an autodiff context.
         let gt_packed: Tensor<2, Int> =
             Tensor::from_data(batch.img_packed, &device.clone().inner());
         let img_size = glam::uvec2(img_w as u32, img_h as u32);
@@ -530,12 +528,7 @@ impl SplatTrainer {
             });
 
             trace_span!("Housekeeping").in_scope(|| {
-                // Refine state accumulates on the inner (non-autodiff) device
-                // so we can mix it with `.inner()`-stripped gradients/aux
-                // without crossing backends. `detach_autodiff` also clears
-                // the residual `checkpointing` flag that bare `.inner()`
-                // leaves behind (see `brush_render::burn_glue`).
-                use brush_render::burn_glue::detach_autodiff;
+                // Refine state and auxiliary tensors stay on the inner device.
                 let device = splats.device().inner();
                 let record = self
                     .refine_record
@@ -548,12 +541,9 @@ impl SplatTrainer {
                 if compute_refine_weight {
                     let refine_weight = refine_weight_holder
                         .grad_remove(&mut grads)
-                        .expect("XY gradients need to be calculated.");
-                    record.gather_stats(
-                        detach_autodiff(refine_weight),
-                        visible.clone(),
-                        max_radius,
-                    );
+                        .expect("XY gradients need to be calculated.")
+                        .without_autodiff();
+                    record.gather_stats(refine_weight, visible.clone(), max_radius);
                 } else {
                     record.gather_aux_stats(visible.clone(), max_radius);
                 }
@@ -726,6 +716,10 @@ impl SplatTrainer {
         // final; baking here would accumulate the filter at every refinement
         // and leave Adam moments inconsistent with the rewritten parameters.
         let device = splats.device();
+        let client = match device.as_dispatch() {
+            burn::backend::DispatchDevice::Cube(d) => Some(d.client()),
+            burn::backend::DispatchDevice::Autodiff(_) => None,
+        };
 
         let refiner = self
             .refine_record
@@ -931,6 +925,10 @@ impl SplatTrainer {
 
         // Update current bounds based on the splats.
         self.bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
+        if let Some(client) = &client {
+            client.memory_cleanup();
+        }
+
         // Recompute the per-splat 3D-filter floor against the new positions/
         // count and attach it. Refine must always leave the floor attached:
         // otherwise the late-training and LOD tails can shrink below it.
@@ -1171,8 +1169,7 @@ async fn prune_points(
         let valid_inds = valid_inds.squeeze_dim(1);
         // Splat params + optimizer state share the autodiff device, but the
         // refiner runs on the inner device — give `keep()` an inner copy.
-        use brush_render::burn_glue::detach_autodiff_int;
-        let inner_valid_inds = detach_autodiff_int(valid_inds.clone().inner());
+        let inner_valid_inds = valid_inds.clone().without_autodiff();
         if let Some(floor) = splats.min_scale.take() {
             splats.min_scale = Some(floor.select(0, inner_valid_inds.clone()));
         }

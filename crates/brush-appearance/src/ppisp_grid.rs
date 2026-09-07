@@ -22,7 +22,7 @@ use burn::{
     },
     tensor::{DType, Shape, Tensor},
 };
-use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
+use burn_cubecl::tensor::CubeTensor;
 use burn_fusion::Fusion;
 
 use crate::bilagrid::grid_dims5;
@@ -78,7 +78,7 @@ pub trait PpispGridOps<B: Backend> {
     ) -> (FloatTensor<B>, FloatTensor<B>, FloatTensor<B>);
 }
 
-fn img_dims<R: CubeRuntime>(rgb: &CubeTensor<R>) -> (u32, u32, u32) {
+fn img_dims(rgb: &CubeTensor) -> (u32, u32, u32) {
     let dims = rgb.shape().as_slice().to_vec();
     assert_eq!(dims.len(), 3, "rgb must be [h, w, c]");
     let ch = dims[2] as u32;
@@ -87,14 +87,14 @@ fn img_dims<R: CubeRuntime>(rgb: &CubeTensor<R>) -> (u32, u32, u32) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn launch_fwd<R: CubeRuntime>(
-    grids: CubeTensor<R>,
-    vignetting: CubeTensor<R>,
-    rgb: CubeTensor<R>,
+fn launch_fwd(
+    grids: CubeTensor,
+    vignetting: CubeTensor,
+    rgb: CubeTensor,
     view_idx: usize,
     camera_idx: usize,
     payload: GridPayload,
-) -> CubeTensor<R> {
+) -> CubeTensor {
     use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
@@ -107,7 +107,7 @@ fn launch_fwd<R: CubeRuntime>(
 
     let out = alloc_zeros(&rgb, rgb.shape(), DType::F32);
     let client = rgb.client.clone();
-    kernels::ppisp_grid_fwd_kernel::launch::<R>(
+    kernels::ppisp_grid_fwd_kernel::launch(
         &client,
         brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE),
         CubeDim::new_1d(kernels::BLOCK_SIZE),
@@ -132,16 +132,16 @@ fn launch_fwd<R: CubeRuntime>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn launch_bwd<R: CubeRuntime>(
-    grids: CubeTensor<R>,
-    vignetting: CubeTensor<R>,
-    rgb: CubeTensor<R>,
-    v_out: CubeTensor<R>,
+fn launch_bwd(
+    grids: CubeTensor,
+    vignetting: CubeTensor,
+    rgb: CubeTensor,
+    v_out: CubeTensor,
     view_idx: usize,
     camera_idx: usize,
     payload: GridPayload,
     subsample: GradSubsample,
-) -> (CubeTensor<R>, CubeTensor<R>, CubeTensor<R>) {
+) -> (CubeTensor, CubeTensor, CubeTensor) {
     use burn::cubecl::prelude::CubeDim;
 
     let grids = contiguous(grids);
@@ -172,7 +172,7 @@ fn launch_bwd<R: CubeRuntime>(
 
     macro_rules! launch {
         ($atomic:ty) => {
-            kernels::ppisp_grid_bwd_kernel::launch::<$atomic, R>(
+            kernels::ppisp_grid_bwd_kernel::launch::<$atomic>(
                 &client,
                 cube_count,
                 cube_dim,
@@ -200,7 +200,7 @@ fn launch_bwd<R: CubeRuntime>(
             )
         };
     }
-    if brush_cube::supports_float_atomics::<R>(&client) {
+    if brush_cube::supports_float_atomics(&client) {
         launch!(HfAtomicAdd);
     } else {
         launch!(CasAtomicAdd);

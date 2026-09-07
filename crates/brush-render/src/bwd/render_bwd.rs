@@ -10,7 +10,7 @@ use burn::cubecl::CubeDim;
 use burn::cubecl::features::{AtomicUsage, Plane};
 use burn::cubecl::ir::{ElemType, FloatKind, Type};
 use burn::tensor::{DType, FloatDType, IntDType};
-use burn_cubecl::{CubeBackend, CubeRuntime, kernel::into_contiguous};
+use burn_cubecl::{CubeBackend, kernel::into_contiguous};
 use glam::{Vec3, uvec2};
 
 use crate::bwd::burn_glue::{
@@ -87,19 +87,19 @@ fn should_launch_unchecked(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rasterize_bwd_impl<R: CubeRuntime>(
-    out_img: FloatTensor<CubeBackend<R>>,
-    projected_splats: FloatTensor<CubeBackend<R>>,
-    compact_gid_from_isect: IntTensor<CubeBackend<R>>,
-    tile_offsets: IntTensor<CubeBackend<R>>,
+fn rasterize_bwd_impl(
+    out_img: FloatTensor<CubeBackend>,
+    projected_splats: FloatTensor<CubeBackend>,
+    compact_gid_from_isect: IntTensor<CubeBackend>,
+    tile_offsets: IntTensor<CubeBackend>,
     background: Vec3,
     img_size: glam::UVec2,
-    v_output: FloatTensor<CubeBackend<R>>,
+    v_output: FloatTensor<CubeBackend>,
     rasterizer: Rasterizer,
     smooth_cutoff: bool,
     compute_refine_weight: bool,
     trusted_forward: bool,
-) -> RasterizeGrads<CubeBackend<R>> {
+) -> RasterizeGrads<CubeBackend> {
     let _span = tracing::trace_span!("rasterize_bwd").entered();
 
     let v_output = into_contiguous(v_output);
@@ -108,8 +108,7 @@ fn rasterize_bwd_impl<R: CubeRuntime>(
     let client = projected_splats.client.clone();
 
     // Sparse [num_visible, 10] indexed by compact_gid.
-    let v_combined =
-        CubeBackend::<R>::float_zeros([num_visible, 10].into(), &device, FloatDType::F32);
+    let v_combined = CubeBackend::float_zeros([num_visible, 10].into(), &device, FloatDType::F32);
 
     let tile_width = rasterizer.tile_width();
     let tile_height = rasterizer.tile_height();
@@ -161,7 +160,7 @@ fn rasterize_bwd_impl<R: CubeRuntime>(
             // batch accesses remain guarded in the kernel. This path uses native float atomics,
             // not the CAS retry loop.
             unsafe {
-                rasterize_backwards_kernel::launch_unchecked::<HfAtomicAdd, R>(
+                rasterize_backwards_kernel::launch_unchecked::<HfAtomicAdd>(
                     &client,
                     cube_count,
                     cube_dim,
@@ -179,7 +178,7 @@ fn rasterize_bwd_impl<R: CubeRuntime>(
                 );
             }
         } else if hard_floats {
-            rasterize_backwards_kernel::launch::<HfAtomicAdd, R>(
+            rasterize_backwards_kernel::launch::<HfAtomicAdd>(
                 &client,
                 cube_count,
                 cube_dim,
@@ -198,7 +197,7 @@ fn rasterize_bwd_impl<R: CubeRuntime>(
         } else {
             // Keep bounds checks for the CAS fallback: its weak-CAS retry loop does not meet
             // CubeCL's unchecked-launch termination contract on every target.
-            rasterize_backwards_kernel::launch::<CasAtomicAdd, R>(
+            rasterize_backwards_kernel::launch::<CasAtomicAdd>(
                 &client,
                 cube_count,
                 cube_dim,
@@ -220,7 +219,7 @@ fn rasterize_bwd_impl<R: CubeRuntime>(
     RasterizeGrads { v_combined }
 }
 
-impl<R: CubeRuntime> SplatBwdOps for CubeBackend<R> {
+impl SplatBwdOps for CubeBackend {
     #[allow(clippy::too_many_arguments)]
     fn rasterize_bwd(
         out_img: FloatTensor<Self>,
@@ -343,7 +342,7 @@ impl<R: CubeRuntime> SplatBwdOps for CubeBackend<R> {
         });
 
         tracing::trace_span!("ProjectBackwards").in_scope(|| {
-            kernels::project_backwards::project_backwards_kernel::launch::<R>(
+            kernels::project_backwards::project_backwards_kernel::launch(
                 &client,
                 calc_cube_count_1d(num_visible, kernels::project_backwards::WG_SIZE),
                 CubeDim::new_1d(kernels::project_backwards::WG_SIZE),
@@ -373,7 +372,7 @@ impl<R: CubeRuntime> SplatBwdOps for CubeBackend<R> {
         {
             if num_visible > 0 {
                 tracing::trace_span!("BuildCompactShMap").in_scope(|| {
-                    kernels::sh_grad_materialize::build_compact_sh_map_kernel::launch::<R>(
+                    kernels::sh_grad_materialize::build_compact_sh_map_kernel::launch(
                         &client,
                         calc_cube_count_1d(num_visible, kernels::sh_grad_materialize::WG_SIZE),
                         CubeDim::new_1d(kernels::sh_grad_materialize::WG_SIZE),
@@ -391,7 +390,7 @@ impl<R: CubeRuntime> SplatBwdOps for CubeBackend<R> {
                 // the zero sentinel or indexes the compact [num_visible, 10]
                 // gradient, and the three lane stores cover the entire SH row.
                 unsafe {
-                    kernels::sh_grad_materialize::materialize_sh_grad_kernel::launch_unchecked::<R>(
+                    kernels::sh_grad_materialize::materialize_sh_grad_kernel::launch_unchecked(
                         &client,
                         calc_cube_count_1d(
                             project_uniforms.total_splats,
@@ -443,7 +442,7 @@ impl<R: CubeRuntime> SplatBwdOps for CubeBackend<R> {
         let v_refine_weight = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
 
         tracing::trace_span!("ProjectBackwardsDeferredSh").in_scope(|| {
-            kernels::project_backwards::project_backwards_kernel::launch::<R>(
+            kernels::project_backwards::project_backwards_kernel::launch(
                 &client,
                 calc_cube_count_1d(
                     project_uniforms.num_visible,
@@ -475,7 +474,7 @@ impl<R: CubeRuntime> SplatBwdOps for CubeBackend<R> {
     }
 }
 
-impl<R: CubeRuntime> InternalSplatBwdOps for CubeBackend<R> {
+impl InternalSplatBwdOps for CubeBackend {
     fn rasterize_bwd_from_forward(input: ForwardRasterBackward<Self>) -> RasterizeGrads<Self> {
         let (
             out_img,

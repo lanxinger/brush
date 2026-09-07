@@ -201,9 +201,7 @@ pub async fn run_cli_ui(
         multi
     };
 
-    if let Some(device) = brush_process::try_device() {
-        log::info!("Compute backend: {device:?}");
-    }
+    log::info!("Compute backend: {:?}", process.device);
 
     let main_spinner = ProgressBar::new_spinner().with_style(
         ProgressStyle::with_template("{spinner:.blue} {msg}")
