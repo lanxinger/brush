@@ -207,8 +207,8 @@ async fn imported_inner_splats_receive_training_gradients() {
 
     let device = Device::from(brush_cube::test_helpers::test_device().await);
     // Follow the importer: construct parameters before autodiff is enabled.
-    // Burn records these parameters as inactive, so Module::train() alone
-    // cannot replace the explicit training lift.
+    // Parameters retain their training intent, while plain-device tensors
+    // remain untracked until lifted. Exercise the production training lift.
     let splats = brush_serde::SplatData {
         means: vec![0.15, -0.1, 0.0, -0.2, 0.12, 0.25],
         rotations: None,

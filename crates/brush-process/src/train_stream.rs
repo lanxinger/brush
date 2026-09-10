@@ -373,8 +373,8 @@ pub(crate) async fn train_stream(
         // then strip back to inner so the viewer slot sees plain splats.
         // `step` immediately replaces `splats` with the returned value, so we
         // can move it here instead of cloning every iteration.
-        // Inner-created parameters have no active autodiff flag. Explicitly
-        // activate all learned splat parameters when starting each step.
+        // Explicitly activate all learned parameters while preserving their
+        // identities and keeping the frozen scale floor on the inner device.
         let diff_splats = brush_render::bwd::burn_glue::lift_splats_to_autodiff(splats);
         let compute_refine_weight = trainer.refinement_weight_needed(iter);
         let (new_diff_splats, stats) = trainer

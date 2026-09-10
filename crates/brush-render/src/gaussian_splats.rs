@@ -89,6 +89,15 @@ pub enum TextureMode {
     Float,
 }
 
+/// Wrap a tensor as a trainable parameter.
+///
+/// On a plain (non-autodiff) device, tensor `require_grad()` is a no-op.
+/// Record the intent on the parameter itself so `train()` enables gradient
+/// tracking after construction and preserves it across `valid()` round trips.
+fn trainable_param<const D: usize>(id: ParamId, tensor: Tensor<D>) -> Param<Tensor<D>> {
+    Param::initialized(id, tensor.detach()).set_require_grad(true)
+}
+
 /// Gaussian splat parameters.
 ///
 /// `transforms` stores means(3) + rotations(4) + log scales(3) = 10 floats per splat
@@ -211,9 +220,9 @@ impl Splats {
         let transforms = Tensor::cat(vec![means, rotation, log_scales], 1);
 
         Self {
-            transforms: Param::initialized(ParamId::new(), transforms.detach().require_grad()),
-            sh_coeffs: Param::initialized(ParamId::new(), sh_coeffs.detach().require_grad()),
-            raw_opacities: Param::initialized(ParamId::new(), raw_opacity.detach().require_grad()),
+            transforms: trainable_param(ParamId::new(), transforms),
+            sh_coeffs: trainable_param(ParamId::new(), sh_coeffs),
+            raw_opacities: trainable_param(ParamId::new(), raw_opacity),
             render_mip: mode == SplatRenderMode::Mip,
             min_scale: None,
         }
@@ -280,10 +289,8 @@ impl Splats {
         if let Some(f) = self.min_scale.take() {
             let (transforms, raw_opac) =
                 fold_min_scale(self.transforms.val(), self.raw_opacities.val(), f);
-            self.transforms =
-                Param::initialized(self.transforms.id, transforms.detach().require_grad());
-            self.raw_opacities =
-                Param::initialized(self.raw_opacities.id, raw_opac.detach().require_grad());
+            self.transforms = trainable_param(self.transforms.id, transforms);
+            self.raw_opacities = trainable_param(self.raw_opacities.id, raw_opac);
         }
         self
     }
@@ -506,6 +513,51 @@ pub async fn render_splats_with_rasterizer(
 #[cfg(test)]
 mod min_scale_fold_tests {
     use super::*;
+    use burn::module::AutodiffModule;
+
+    /// A standard training lift must track every parameter, including after
+    /// `valid()` round trips and scale-floor baking on the plain device.
+    #[tokio::test]
+    async fn splats_built_on_plain_device_train_with_gradients() {
+        let device = Device::from(brush_cube::test_helpers::test_device().await);
+        let n = 4;
+        let splats = Splats::from_tensor_data(
+            Tensor::zeros([n, 3], &device),
+            Tensor::ones([n, 4], &device),
+            Tensor::zeros([n, 3], &device),
+            Tensor::zeros([n, 1, 3], &device),
+            Tensor::zeros([n], &device),
+            SplatRenderMode::Default,
+        );
+
+        let assert_tracked = |splats: &Splats, what: &str| {
+            assert!(splats.device().is_autodiff(), "{what}: not lifted");
+            assert!(
+                splats.transforms.val().is_require_grad(),
+                "{what}: transforms not tracked"
+            );
+            assert!(
+                splats.sh_coeffs.val().is_require_grad(),
+                "{what}: sh_coeffs not tracked"
+            );
+            assert!(
+                splats.raw_opacities.val().is_require_grad(),
+                "{what}: raw_opacities not tracked"
+            );
+        };
+
+        let diff = splats.clone().train();
+        assert_tracked(&diff, "first lift");
+
+        let round_trip = diff.valid().train();
+        assert_tracked(&round_trip, "valid/train round trip");
+
+        let baked = splats
+            .with_min_scale(Tensor::ones([n], &device))
+            .bake_min_scale()
+            .train();
+        assert_tracked(&baked, "after bake_min_scale");
+    }
 
     fn test_inputs(device: &Device) -> (Tensor<2>, Tensor<1>, Tensor<1>, Vec<f32>) {
         let log_scales = vec![-14.0_f32, -15.0, -16.0, -18.0, -20.0];
