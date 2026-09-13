@@ -86,6 +86,12 @@ pub struct LoadDatasetConfig {
     )]
     #[serde(default)]
     pub invert_masks: bool,
+    /// Dataset units per metre. Camera positions and initial splats are divided
+    /// by this on load so training runs in metres, and exports multiply back.
+    /// E.g. 1000 for a scene reconstructed in millimetres.
+    #[arg(long, help_heading = "Dataset Options", default_value = "1.0")]
+    #[serde(default = "default_units_per_meter")]
+    pub units_per_meter: f32,
     /// Max size of the cache for frames of the dataset, larger values usually improve performance for large datasets at the cost of more memory usage, can be e.g. 6G, 6000M, 6000MiB, 6000MB
     #[arg(long, help_heading = "Dataset Options", default_value = DEFAULT_MAX_SCENE_BATCH_CACHE_SIZE, value_parser = parse_size)]
     pub max_scene_batch_cache_size: u64,
@@ -93,6 +99,14 @@ pub struct LoadDatasetConfig {
 
 impl LoadDatasetConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if !(self.units_per_meter.is_finite()
+            && self.units_per_meter > 0.0
+            && self.units_per_meter.recip().is_finite())
+        {
+            return Err(
+                "units-per-meter must be finite and positive with a finite reciprocal".to_owned(),
+            );
+        }
         if self.max_resolution == 0 {
             return Err("max-resolution must be greater than zero".to_owned());
         }
@@ -119,6 +133,10 @@ impl LoadDatasetConfig {
         }
         Ok(())
     }
+}
+
+fn default_units_per_meter() -> f32 {
+    1.0
 }
 
 fn parse_size(s: &str) -> Result<u64, parse_size::Error> {

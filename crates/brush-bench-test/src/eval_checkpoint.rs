@@ -210,6 +210,7 @@ mod native {
             alpha_mode: Some(args.alpha_mode),
             train_on_eval: false,
             invert_masks: args.invert_masks,
+            units_per_meter: 1.0,
             // Evaluation loads each held-out view exactly once; retain the
             // conventional native budget for loader/config parity.
             max_scene_batch_cache_size: 6 * 1024 * 1024 * 1024,

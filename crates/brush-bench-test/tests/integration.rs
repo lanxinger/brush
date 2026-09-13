@@ -380,6 +380,7 @@ async fn refinement_weight_stops_at_growth_boundary() {
         burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let config = TrainConfig {
         total_train_iters: 100,
+        growth_start_iter: 20,
         growth_stop_iter: 40,
         ..TrainConfig::default()
     };
@@ -389,6 +390,8 @@ async fn refinement_weight_stops_at_growth_boundary() {
         BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
     );
 
+    assert!(!trainer.refinement_weight_needed(19));
+    assert!(trainer.refinement_weight_needed(20));
     assert!(trainer.refinement_weight_needed(39));
     assert!(!trainer.refinement_weight_needed(40));
     assert!(!trainer.refinement_weight_needed(100));
@@ -531,4 +534,239 @@ async fn stress_concurrent_train_and_view() {
         d.await;
     }
     drop(viewer_actors);
+}
+
+async fn all_finite(splats: &Splats) -> bool {
+    for t in [
+        splats.means().into_data_async().await.unwrap(),
+        splats.log_scales().into_data_async().await.unwrap(),
+    ] {
+        if !t.iter::<f32>().all(f32::is_finite) {
+            return false;
+        }
+    }
+    splats
+        .opacities()
+        .into_data_async()
+        .await
+        .unwrap()
+        .iter::<f32>()
+        .all(f32::is_finite)
+}
+
+// A run of one iteration (or a degenerate zero) must not poison the LR decay
+// (exponent 1 / iters) or the refine schedule (iter / iters) with inf or NaN.
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn tiny_training_runs_stay_finite() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let batch = generate_test_batch((64, 64));
+    for total_train_iters in [0, 1] {
+        let config = TrainConfig {
+            total_train_iters,
+            ..TrainConfig::default()
+        };
+        let mut trainer = SplatTrainer::new(
+            &config,
+            &device,
+            BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
+        );
+        let mut splats = generate_test_splats(&device, 100);
+        for iter in 0..3 {
+            let (new_splats, _) = trainer.step(batch.clone(), splats).await;
+            // Match the process: refine on the plain device, then lift for
+            // the next step so optimizer state stays outside autodiff.
+            let (new_splats, _) = trainer.refine(iter, new_splats.valid()).await;
+            splats = brush_render::bwd::lift_splats_to_autodiff(new_splats);
+        }
+        assert!(
+            all_finite(&splats).await,
+            "non-finite params with total_train_iters = {total_train_iters}"
+        );
+    }
+}
+
+// Gradient-driven growth only runs inside [growth_start_iter, growth_stop_iter).
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn growth_waits_for_start_iter() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let batch = generate_test_batch((64, 64));
+    // Every visible splat with any gradient qualifies, so growth is only
+    // absent when the gate says so.
+    let config = TrainConfig {
+        growth_grad_threshold: 0.0,
+        growth_select_fraction: 1.0,
+        growth_start_iter: 1000,
+        growth_stop_iter: 2000,
+        split_at_screen_size: 0.0,
+        ..TrainConfig::default()
+    };
+    let mut trainer = SplatTrainer::new(
+        &config,
+        &device,
+        BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
+    );
+
+    let mut splats = generate_test_splats(&device, 100);
+    for _ in 0..5 {
+        let (new_splats, _) = trainer.step(batch.clone(), splats).await;
+        splats = new_splats;
+    }
+    let (splats, before) = trainer.refine(500, splats.valid()).await;
+    assert_eq!(before.num_split_high_grad, 0);
+
+    let mut splats = brush_render::bwd::lift_splats_to_autodiff(splats);
+    for _ in 0..5 {
+        let (new_splats, _) = trainer.step(batch.clone(), splats).await;
+        splats = new_splats;
+    }
+    let (splats, inside) = trainer.refine(1500, splats.valid()).await;
+    assert!(inside.num_split_high_grad > 0);
+
+    let mut splats = brush_render::bwd::lift_splats_to_autodiff(splats);
+    for _ in 0..5 {
+        let (new_splats, _) = trainer.step(batch.clone(), splats).await;
+        splats = new_splats;
+    }
+    let (_, after) = trainer.refine(2500, splats.valid()).await;
+    assert_eq!(after.num_split_high_grad, 0);
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn configured_filter_scales_and_can_be_disabled() {
+    let device = Device::from(brush_cube::test_helpers::test_device().await);
+    let splats = generate_test_splats(&device, 10);
+    let bounds = BoundingBox::from_min_max(Vec3::splat(-2.0), Vec3::splat(2.0));
+    let mut previous_floor: Option<Vec<f32>> = None;
+    let mut filtered = splats.clone();
+    for min_scale_factor in [0.1, 0.4, 0.0] {
+        let config = TrainConfig {
+            min_scale_factor,
+            ..TrainConfig::default()
+        };
+        let mut trainer = SplatTrainer::new(&config, &device, bounds);
+        trainer.set_view_cams(vec![(Vec3::new(0.0, 0.0, -10.0), 100.0)]);
+        filtered = trainer.apply_min_scale_floor(filtered);
+        if min_scale_factor == 0.0 {
+            assert!(filtered.min_scale.is_none());
+        } else {
+            let floor = filtered
+                .min_scale
+                .clone()
+                .unwrap()
+                .into_data_async()
+                .await
+                .unwrap()
+                .try_to_vec::<f32>()
+                .unwrap();
+            if let Some(previous) = &previous_floor {
+                for (a, b) in previous.iter().zip(&floor) {
+                    assert!((b - 2.0 * a).abs() < 1e-6);
+                }
+            }
+            previous_floor = Some(floor);
+        }
+    }
+    assert_eq!(
+        filtered.transforms.val().into_data_async().await.unwrap(),
+        splats.transforms.val().into_data_async().await.unwrap()
+    );
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn dataset_unit_export_preserves_baked_geometry_and_opacity() {
+    use burn::tensor::Tensor;
+    let device = Device::from(brush_cube::test_helpers::test_device().await);
+    let splats =
+        generate_test_splats(&device, 10).with_min_scale(Tensor::full([10], 0.02, &device));
+    let expected = splats.clone().bake_min_scale();
+    let data = brush_serde::splat_to_ply(splats.scaled(1000.0), None)
+        .await
+        .unwrap();
+    let imported = brush_serde::load_splat_from_ply(std::io::Cursor::new(data), None)
+        .await
+        .unwrap()
+        .data
+        .into_splats(&device, SplatRenderMode::Default)
+        .scaled(0.001);
+    for (expected, actual) in [
+        (expected.means(), imported.means()),
+        (expected.log_scales(), imported.log_scales()),
+        (
+            expected.opacities().unsqueeze(),
+            imported.opacities().unsqueeze(),
+        ),
+    ] {
+        let expected = expected
+            .into_data_async()
+            .await
+            .unwrap()
+            .try_to_vec::<f32>()
+            .unwrap();
+        let actual = actual
+            .into_data_async()
+            .await
+            .unwrap()
+            .try_to_vec::<f32>()
+            .unwrap();
+        for (a, b) in expected.iter().zip(actual) {
+            assert!((a - b).abs() < 1e-5, "export changed {a} to {b}");
+        }
+    }
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn distorted_cameras_render_and_backpropagate_finite_gradients() {
+    use brush_render::kernels::camera_model::{
+        CameraModel, kannala_brandt_4::KannalaBrandt4Params,
+        radial_tangential_8::RadialTangential8Params, thin_prism_fisheye::ThinPrismFisheyeParams,
+    };
+    let device = Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let kb4 = KannalaBrandt4Params {
+        k1: 0.278781,
+        k2: 0.464781,
+        k3: -0.148871,
+        k4: -0.150010,
+    };
+    for model in [
+        CameraModel::KannalaBrandt4(kb4),
+        CameraModel::ThinPrismFisheye(ThinPrismFisheyeParams {
+            kb4,
+            ..Default::default()
+        }),
+        CameraModel::RadialTangential8(RadialTangential8Params {
+            k1: 0.15,
+            k2: 0.08,
+            k3: 0.02,
+            k4: 0.03,
+            p1: 0.001,
+            p2: -0.002,
+            ..Default::default()
+        }),
+    ] {
+        let camera = Camera::new(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1.8,
+            1.5,
+            glam::Vec2::splat(0.5),
+            model,
+        );
+        let splats = generate_test_splats(&device, 100);
+        let output = render_splats(splats.clone(), &camera, glam::uvec2(64, 48), Vec3::ZERO).await;
+        assert!(output.num_visible > 0);
+        let grads = output.img.sum().backward();
+        let gradient = splats
+            .transforms
+            .grad(&grads)
+            .expect("transform gradients")
+            .into_data_async()
+            .await
+            .unwrap()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(gradient.iter().all(|x| x.is_finite()));
+        assert!(gradient.iter().any(|x| x.abs() > 0.0));
+    }
 }

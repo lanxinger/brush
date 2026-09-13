@@ -130,6 +130,7 @@ mod native {
             alpha_mode: args.alpha_mode,
             train_on_eval: false,
             invert_masks: args.invert_masks,
+            units_per_meter: 1.0,
             // The replay owns its few decoded views directly, so the scene-loader
             // cache is unused. Keep the conventional value for config parity.
             max_scene_batch_cache_size: 6 * 1024 * 1024 * 1024,

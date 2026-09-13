@@ -32,10 +32,6 @@ pub const BOUND_PERCENTILE: f32 = 0.8;
 
 const MIN_OPACITY: f32 = 1.0 / 255.0;
 
-/// Mip-Splatting 3D-filter strength. This is intentionally fixed: changing it
-/// alters the learned/exported representation rather than just training speed.
-const MIN_SCALE_FACTOR: f32 = 0.1;
-
 #[cfg(test)]
 mod refinement_tests;
 
@@ -235,16 +231,24 @@ impl SplatTrainer {
         bounds: BoundingBox,
         seed: u64,
     ) -> Self {
-        let decay =
-            (config.lr_mean_end / config.lr_mean).powf(1.0 / config.total_train_iters as f64);
+        // The per-step decay reaching lr_mean_end at the last iteration. With
+        // one iteration or fewer there is nothing to decay over (and the
+        // exponent 1/iters would be undefined), so hold the LR.
+        let decay = if config.total_train_iters > 1 {
+            (config.lr_mean_end / config.lr_mean).powf(1.0 / config.total_train_iters as f64)
+        } else {
+            1.0
+        };
 
         let ssim_enabled = config.ssim_weight > 0.0;
 
         // Growth is gated on the global iter. LOD phases run past
         // total_train_iters but their refines should never grow — clamp
-        // here so growth_stop is never effectively past end-of-training.
+        // here so growth_stop is never effectively past end-of-training,
+        // and growth_start never past growth_stop.
         let mut config = config.clone();
         config.growth_stop_iter = config.growth_stop_iter.min(config.total_train_iters);
+        config.growth_start_iter = config.growth_start_iter.min(config.growth_stop_iter);
 
         #[cfg(not(target_family = "wasm"))]
         let lpips = (config.lpips_loss_weight > 0.0).then(|| lpips::load_vgg_lpips(device));
@@ -266,8 +270,13 @@ impl SplatTrainer {
         }
     }
 
-    /// Supply per-train-view (world center, focal-px at native res) for the
-    /// Mip-Splatting 3D filter.
+    /// Percentile bounding box of the splats, refreshed on each refine.
+    pub fn bounds(&self) -> BoundingBox {
+        self.bounds
+    }
+
+    /// Supply per-train-view (world center, focal-px at native res) to enable
+    /// the Mip-Splatting 3D filter (gated on `config.min_scale_factor > 0`).
     pub fn set_view_cams(&mut self, view_cams: Vec<(glam::Vec3, f32)>) {
         self.view_cams = view_cams;
     }
@@ -275,9 +284,13 @@ impl SplatTrainer {
     /// Attach the Mip-Splatting scale floor for the trainer's active camera
     /// resolution. Replaces any existing floor without baking it; callers
     /// that change splat count must drop or select the old floor first.
-    pub fn apply_min_scale_floor(&self, splats: Splats) -> Splats {
+    pub fn apply_min_scale_floor(&self, mut splats: Splats) -> Splats {
+        if self.config.min_scale_factor == 0.0 {
+            splats.min_scale = None;
+            return splats;
+        }
         let means = splats.means();
-        match compute_min_scale(&means, &self.view_cams, MIN_SCALE_FACTOR) {
+        match compute_min_scale(&means, &self.view_cams, self.config.min_scale_factor) {
             Some(floor) => splats.with_min_scale(floor),
             None => splats,
         }
@@ -371,7 +384,7 @@ impl SplatTrainer {
     /// Whether the refinement-only gradient statistic is still consumed by
     /// high-gradient densification at `global_iter`.
     pub fn refinement_weight_needed(&self, global_iter: u32) -> bool {
-        global_iter < self.config.growth_stop_iter
+        global_iter >= self.config.growth_start_iter && global_iter < self.config.growth_stop_iter
     }
 
     /// Run one training step, optionally omitting the refinement-only raster
@@ -874,7 +887,9 @@ impl SplatTrainer {
         let num_split_oversized = (split_inds.len() - pre_oversized) as u32;
 
         let pre_high_grad = split_inds.len();
-        if global_iter < self.config.growth_stop_iter {
+        if global_iter >= self.config.growth_start_iter
+            && global_iter < self.config.growth_stop_iter
+        {
             let above_threshold = refiner.above_threshold(self.config.growth_grad_threshold);
 
             let threshold_count = above_threshold

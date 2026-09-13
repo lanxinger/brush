@@ -237,9 +237,10 @@ pub async fn run_cli_ui(
             .tick_strings(&["ℹ️", "ℹ️"]),
     );
 
+    // Sized once the process emits its final config: the CLI args alone are
+    // wrong when a dataset's args.txt is merged in.
     let train_progress = {
-        let tc = &train_stream_config.train_config;
-        let bar = ProgressBar::new(tc.total_iters() as u64)
+        let bar = ProgressBar::new(0)
         .with_style(
             ProgressStyle::with_template(
                 "[{elapsed}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg} ({per_sec}, {eta} remaining)",
@@ -377,8 +378,9 @@ pub async fn run_cli_ui(
                 stats_spinner.set_message("Completed loading");
             }
             ProcessMessage::Warning { error } => {
-                log::warn!("{error}");
-                sp.println(format!("⚠️: {error}"))?;
+                // Alternate form prints the whole anyhow context chain.
+                log::warn!("{error:#}");
+                sp.println(format!("⚠️: {error:#}"))?;
             }
             #[allow(unreachable_patterns)]
             _ => {}

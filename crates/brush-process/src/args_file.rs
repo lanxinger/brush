@@ -281,6 +281,39 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     #[wasm_bindgen_test(unsupported = test)]
+    fn new_training_options_preserve_saved_configs_and_round_trip() {
+        let mut saved = serde_json::to_value(TrainStreamConfig::default()).unwrap();
+        for field in ["units-per-meter", "growth-start-iter", "min-scale-factor"] {
+            assert!(saved.as_object_mut().unwrap().remove(field).is_some());
+        }
+        let restored: TrainStreamConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.load_config.units_per_meter, 1.0);
+        assert_eq!(restored.train_config.growth_start_iter, 0);
+        assert_eq!(restored.train_config.min_scale_factor, 0.1);
+
+        let mut config = restored;
+        config.load_config.units_per_meter = 1000.0;
+        config.train_config.growth_start_iter = 500;
+        config.train_config.min_scale_factor = 0.0;
+        let mut args = vec!["brush".to_owned()];
+        args.extend(config_to_args(&config));
+        let parsed = TrainStreamConfig::try_parse_from(args).unwrap();
+        assert_eq!(parsed.load_config.units_per_meter, 1000.0);
+        assert_eq!(parsed.train_config.growth_start_iter, 500);
+        assert_eq!(parsed.train_config.min_scale_factor, 0.0);
+
+        for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::from_bits(1)] {
+            config.load_config.units_per_meter = invalid;
+            assert!(config.validate().is_err(), "accepted units {invalid}");
+        }
+        config.load_config.units_per_meter = 1.0;
+        for invalid in [-1.0, f32::NAN, f32::INFINITY] {
+            config.train_config.min_scale_factor = invalid;
+            assert!(config.validate().is_err(), "accepted filter {invalid}");
+        }
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_config_to_args_only_includes_changes() {
         let mut config = TrainStreamConfig::default();
         config.train_config.total_train_iters = 5000;
