@@ -37,11 +37,8 @@ use burn_cubecl::{
     fusion::FusionCubeRuntime, kernel::into_contiguous, ops::numeric::zeros_client,
     tensor::CubeTensor,
 };
-use burn_fusion::{
-    ExecutionError, FusionHandle,
-    stream::{Operation, StreamId},
-};
-use burn_ir::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
+use burn_fusion::FusionHandle;
+use burn_fusion::custom::{CustomOpIr, HandleContainer};
 
 pub(crate) use brush_cube::{AtomicAddF32, CasAtomicAdd, HfAtomicAdd};
 
@@ -54,38 +51,10 @@ pub(crate) fn alloc_zeros(template: &CubeTensor, shape: Shape, dtype: DType) -> 
     )
 }
 
-/// Wraps a closure as a fusion `Operation` (same pattern as `brush-loss`).
-struct ClosureOp<F> {
-    desc: CustomOpIr,
-    op: F,
-}
-
-impl<F> std::fmt::Debug for ClosureOp<F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ClosureOp({:?})", self.desc)
-    }
-}
-
-impl<F> Operation<FusionCubeRuntime> for ClosureOp<F>
-where
-    F: Fn(&CustomOpIr, &mut HandleContainer<FusionHandle<FusionCubeRuntime>>)
-        + Send
-        + Sync
-        + 'static,
-{
-    fn execute(
-        &self,
-        h: &mut HandleContainer<FusionHandle<FusionCubeRuntime>>,
-    ) -> Result<(), ExecutionError> {
-        (self.op)(&self.desc, h);
-        Ok(())
-    }
-}
-
 pub(crate) type FusionTensor = burn_fusion::FusionTensor<FusionCubeRuntime>;
 
 /// Register a custom op with `N` inputs and `M` outputs on the Fusion
-/// stream. Generalises `brush-loss`'s single-output helper: each output is
+/// stream through the shared `brush-cube` bridge. Each output is
 /// described by `(shape, dtype)`; `op` runs against the inner backend when
 /// fusion executes the queued op.
 pub(crate) fn dispatch_custom<const N: usize, const M: usize, F>(
@@ -101,17 +70,7 @@ where
         + 'static,
 {
     let client = inputs[0].client.clone();
-    let outs =
-        outputs.map(|(shape, dtype)| TensorIr::uninit(client.create_empty_handle(), shape, dtype));
-    let stream = StreamId::current();
-    let desc = CustomOpIr::new(name, &inputs.map(|t| t.into_ir()), &outs);
-    let wrapped = ClosureOp {
-        desc: desc.clone(),
-        op,
-    };
-    client
-        .register(stream, OperationIr::Custom(desc), wrapped)
-        .outputs()
+    brush_cube::fusion::register_custom(&client, name, inputs, outputs, op)
 }
 
 /// Resolve a possibly-fused float tensor into a contiguous `CubeTensor`.

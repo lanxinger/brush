@@ -209,6 +209,8 @@ async fn render_test_scene(
         cube_tensor(&device, [means.len(), 10], &transforms),
         cube_tensor(&device, [means.len(), 1, 3], &sh),
         cube_tensor(&device, [means.len()], &raw_opacity),
+        cube_tensor(&device, [1], &[0.0]),
+        false,
         SplatRenderMode::Default,
         Vec3::new(0.13, 0.07, 0.19),
         pass,

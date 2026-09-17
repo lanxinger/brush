@@ -64,7 +64,7 @@ pub fn get_tile_offsets(
 #[cfg(test)]
 mod tests {
     use super::{CHECKS_PER_ITER, get_tile_offsets};
-    use brush_cube::{MainBackendBase, calc_cube_count_1d, create_tensor_from_slice};
+    use brush_cube::{MainBackendBase, create_tensor_from_slice};
     use burn::backend::ops::IntTensorOps;
     use burn::cubecl::CubeDim;
     use burn::tensor::DType;
@@ -117,7 +117,11 @@ mod tests {
 
         get_tile_offsets::launch(
             &client,
-            calc_cube_count_1d(num_inter, cube_dim.x * CHECKS_PER_ITER),
+            burn::cubecl::calculate_cube_count_elemwise(
+                &client,
+                num_inter as usize,
+                burn::cubecl::CubeDim::new_1d(cube_dim.x * CHECKS_PER_ITER),
+            ),
             cube_dim,
             num_inter,
             NUM_TILES,

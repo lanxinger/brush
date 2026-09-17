@@ -6,6 +6,8 @@
 
 #### Training performance
 
+Ported upstream [#546](https://github.com/ArthurBrussee/brush/pull/546) at `e827906d`: updated Burn/CubeCL, shared GPU scans, projection-side scale floors, compact gradients, and tile-reduced RGBA loss. The fork retains appearance compensation and native-MSL optimizer, raster, and saved-loss options.
+
 Most of the loss and backward path was rewritten over the cycle. SSIM moved to a dedicated fused kernel and was then folded together with L1 into a single forward pass ([#394](https://github.com/ArthurBrussee/brush/pull/394), [#401](https://github.com/ArthurBrussee/brush/pull/401)). SSIM's saved-for-backward tensors are now recomputed on the fly ([#409](https://github.com/ArthurBrussee/brush/pull/409)). The per-splat backward early-outs for splats that don't actually contribute to any pixel ([#394](https://github.com/ArthurBrussee/brush/pull/394)). Internal gradients and buffers are sparse where they used to be dense ([#378](https://github.com/ArthurBrussee/brush/pull/378)). Ground-truth images are packed to u32 RGBA on the GPU with background compositing and masking folded into the loss kernel, roughly 4x less pixel-side memory plus a chain of mixed-dtype Burn ops gone ([#410](https://github.com/ArthurBrussee/brush/pull/410)). The radix sort was rewritten to be ~50% faster, which also lifted rendering ~10-15% ([#386](https://github.com/ArthurBrussee/brush/pull/386)). Loading throughput and peak memory both improved meaningfully ([#280](https://github.com/ArthurBrussee/brush/pull/280), [#325](https://github.com/ArthurBrussee/brush/pull/325)).
 
 #### Reconstruction quality & densification

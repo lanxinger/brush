@@ -109,7 +109,11 @@ fn launch_fwd(
     let client = rgb.client.clone();
     kernels::ppisp_grid_fwd_kernel::launch(
         &client,
-        brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE),
+        burn::cubecl::calculate_cube_count_elemwise(
+            &client,
+            (h * w) as usize,
+            burn::cubecl::CubeDim::new_1d(kernels::BLOCK_SIZE),
+        ),
         CubeDim::new_1d(kernels::BLOCK_SIZE),
         grids.into_tensor_arg(),
         vignetting.into_tensor_arg(),
@@ -166,7 +170,11 @@ fn launch_bwd(
 
     // Keep one partial row per logical cube; the kernel guards any padded
     // workgroups introduced by the 2D dispatch.
-    let cube_count = brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE);
+    let cube_count = burn::cubecl::calculate_cube_count_elemwise(
+        &client,
+        (h * w) as usize,
+        burn::cubecl::CubeDim::new_1d(kernels::BLOCK_SIZE),
+    );
     let cube_dim = CubeDim::new_1d(kernels::BLOCK_SIZE);
     let grid_offset = view_idx as u32 * gc * gl * gh * gw;
 
@@ -419,17 +427,13 @@ pub fn ppisp_grid_apply(
     let rgb_ad = unwrap_ad_wgpu_float(rgb);
 
     let prep = PpispGridBackward
-        .prepare::<NoCheckpointing>([
-            grids_ad.node.clone(),
-            vig_ad.node.clone(),
-            rgb_ad.node.clone(),
-        ])
+        .prepare::<NoCheckpointing>([grids_ad.node(), vig_ad.node(), rgb_ad.node()])
         .compute_bound()
         .stateful();
 
-    let grids_p = grids_ad.primitive;
-    let vig_p = vig_ad.primitive;
-    let rgb_p = rgb_ad.primitive;
+    let grids_p = grids_ad.into_primitive();
+    let vig_p = vig_ad.into_primitive();
+    let rgb_p = rgb_ad.into_primitive();
     let out = <MainBackend as PpispGridOps<MainBackend>>::ppisp_grid_fwd(
         grids_p.clone(),
         vig_p.clone(),

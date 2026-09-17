@@ -17,7 +17,7 @@ use brush_render::bwd::{DeferredShGrad, render_splats_for_training};
 use brush_render::gaussian_splats::Splats;
 use brush_render::{AlphaMode, bounding_box::BoundingBox, sh::sh_coeffs_for_degree};
 use burn::{
-    module::{AutodiffModule, Param},
+    module::Param,
     tensor::{
         Bool, Device, Distribution, Gradients, IndexingUpdateOp::Assign, Int, Tensor, TensorData,
         activation::sigmoid, s,
@@ -122,6 +122,12 @@ pub struct SplatTrainer {
     /// Per-step multiplier of the exponential mean-LR schedule:
     /// `lr(n) = lr_mean * decay^(n-1)`.
     lr_mean_decay: f64,
+    /// Per-column LR scales for `transforms` (`means(3) + rotations(4) +
+    /// log_scales(3)`) with the mean columns zeroed, and a mask of those
+    /// columns: the scheduled mean LR is mixed in on the device each step so
+    /// the optimizer never waits on a host upload.
+    lr_scaling_fixed: Tensor<2>,
+    lr_mean_columns: Tensor<2>,
     refine_record: Option<RefineRecord>,
     optim: Option<SplatOptim>,
     /// Optional per-view appearance compensation (bilateral grid / PPISP).
@@ -219,12 +225,10 @@ pub async fn get_splat_bounds(splats: Splats, percentile: f32) -> BoundingBox {
 }
 
 impl SplatTrainer {
-    #[allow(unused_variables)]
     pub fn new(config: &TrainConfig, device: &Device, bounds: BoundingBox) -> Self {
         Self::new_seeded(config, device, bounds, 42)
     }
 
-    #[allow(unused_variables)]
     pub fn new_seeded(
         config: &TrainConfig,
         device: &Device,
@@ -242,6 +246,20 @@ impl SplatTrainer {
 
         let ssim_enabled = config.ssim_weight > 0.0;
 
+        // Optimizer state lives on the inner device.
+        let opt_device = device.clone().inner();
+        let (rot, scale) = (config.lr_rotation as f32, config.lr_scale as f32);
+        let lr_scaling_fixed = Tensor::<1>::from_floats(
+            [0.0, 0.0, 0.0, rot, rot, rot, rot, scale, scale, scale],
+            &opt_device,
+        )
+        .reshape([1, 10]);
+        let lr_mean_columns = Tensor::<1>::from_floats(
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &opt_device,
+        )
+        .reshape([1, 10]);
+
         // Growth is gated on the global iter. LOD phases run past
         // total_train_iters but their refines should never grow — clamp
         // here so growth_stop is never effectively past end-of-training,
@@ -256,6 +274,8 @@ impl SplatTrainer {
         Self {
             config,
             lr_mean_decay: decay,
+            lr_scaling_fixed,
+            lr_mean_columns,
             optim: None,
             appearance: None,
             refine_record: None,
@@ -441,7 +461,15 @@ impl SplatTrainer {
             .as_mut()
             .map(|state| state.begin_step(batch.view_index));
 
-        let (mut grads, visible, num_visible, loss_inner, deferred_sh_grad) = {
+        let lr_mean = self.config.lr_mean
+            * self.lr_mean_decay.powi(self.step_count as i32 - 1)
+            * median_scale as f64;
+        let masked_alpha = batch.alpha_mode == AlphaMode::Masked;
+        let do_alpha_match = has_alpha && !masked_alpha && self.config.match_alpha_weight > 0.0;
+        let lr_scaling =
+            self.lr_scaling_fixed.clone() + self.lr_mean_columns.clone() * lr_mean as f32;
+
+        let (mut grads, visible, opacities, num_visible, loss_inner, deferred_sh_grad) = {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
             let render_input = splats.clone();
@@ -468,6 +496,7 @@ impl SplatTrainer {
             let deferred_sh_grad = diff_out.deferred_sh_grad;
             let visible = diff_out.visible;
             let max_radius = diff_out.max_radius;
+            let opacities = diff_out.opacities;
 
             // RGB loss is `(1 - w) * L1 + (-w) * SSIM` per pixel. Bg
             // compositing always runs in the kernel; for synthesised opaque
@@ -477,13 +506,11 @@ impl SplatTrainer {
             // a = 1 would pull predicted alpha to fully opaque); we feed
             // `pred` with 4 channels and the kernel's `c == 3` workgroup
             // emits `|pred.a - gt.a|` into the alpha channel.
-            let masked_alpha = batch.alpha_mode == AlphaMode::Masked;
             let (l1_w, ssim_w) = if self.ssim_enabled {
                 (1.0 - self.config.ssim_weight, -self.config.ssim_weight)
             } else {
                 (1.0, 0.0)
             };
-            let do_alpha_match = has_alpha && !masked_alpha && self.config.match_alpha_weight > 0.0;
             // Only composite when there's a real alpha channel and a non-zero
             // bg to mix in; the kernel skips the per-pixel `(1-a)*bg` math
             // entirely when this is None.
@@ -493,24 +520,17 @@ impl SplatTrainer {
                 ssim_weight: ssim_w,
                 composite_bg,
                 mask: masked_alpha,
+                alpha_weight: if do_alpha_match {
+                    self.config.match_alpha_weight
+                } else {
+                    0.0
+                },
             };
-            let pred_for_loss = if do_alpha_match {
-                pred_image.clone()
-            } else {
-                pred_image.clone().slice(s![.., .., 0..3])
-            };
-            let loss_map = image_loss(pred_for_loss, gt_packed.clone(), cfg);
-
+            // The kernel takes the RGBA image as rendered.
             // `loss` is only reassigned by the LPIPS path below, which is
             // compiled out on wasm — so `mut` is unused there.
             #[cfg_attr(target_family = "wasm", allow(unused_mut))]
-            let mut loss = if do_alpha_match {
-                let rgb = loss_map.clone().slice(s![.., .., 0..3]).mean();
-                let alpha = loss_map.slice(s![.., .., 3..4]).mean();
-                rgb + alpha * self.config.match_alpha_weight
-            } else {
-                loss_map.mean()
-            };
+            let mut loss = image_loss(pred_image.clone(), gt_packed.clone(), cfg);
 
             // LPIPS still needs an f32 RGB tensor for VGG. Materialising it
             // here costs ~99 MB at 4K, only when LPIPS is enabled.
@@ -568,6 +588,7 @@ impl SplatTrainer {
             (
                 grads,
                 visible,
+                opacities,
                 diff_out.num_visible,
                 loss_inner,
                 deferred_sh_grad,
@@ -599,29 +620,7 @@ impl SplatTrainer {
                 }
             });
 
-        let lr_mean = self.config.lr_mean
-            * self.lr_mean_decay.powi(self.step_count as i32 - 1)
-            * median_scale as f64;
-
-        // Update per-component LR scaling for the transforms param.
-        // transforms layout: means(3) + rotations(4) + log_scales(3)
-        // We use base_lr=1.0 and encode actual LRs in the scaling tensor.
-        {
-            let lr_values: [f32; 10] = [
-                lr_mean as f32,
-                lr_mean as f32,
-                lr_mean as f32,
-                self.config.lr_rotation as f32,
-                self.config.lr_rotation as f32,
-                self.config.lr_rotation as f32,
-                self.config.lr_rotation as f32,
-                self.config.lr_scale as f32,
-                self.config.lr_scale as f32,
-                self.config.lr_scale as f32,
-            ];
-            optimizer.transforms.scaling =
-                Some(Tensor::<1>::from_floats(lr_values.as_slice(), &opt_device).reshape([1, 10]));
-        }
+        optimizer.transforms.scaling = Some(lr_scaling);
 
         splats = trace_span!("Optimizer step").in_scope(|| {
             splats.transforms = trace_span!("Transforms step").in_scope(|| {
@@ -666,11 +665,10 @@ impl SplatTrainer {
 
         // Add random noise. Only do this in the growth phase, otherwise
         // let the splats settle in without noise, not much point in exploring regions anymore.
-        // The noise gate is non-differentiable bookkeeping. Read opacity from
-        // the valid (inner) splats so the sigmoid never lands on the autodiff
-        // graph, and `visible` is already inner — so nothing here builds a
-        // node that won't get a backward pass.
-        let inv_opac: Tensor<1> = 1.0 - splats.valid().opacities();
+        // The noise gate is non-differentiable bookkeeping. The forward
+        // already computed every splat's floored opacity, on the inner device,
+        // so nothing here builds a node that won't get a backward pass.
+        let inv_opac: Tensor<1> = 1.0 - opacities;
         let noise_weight = inv_opac.powi_scalar(150.0).clamp(0.0, 1.0) * visible;
         let noise_weight = noise_weight.unsqueeze_dim(1);
         // `samples` is pure data — keep it on the inner device so it can

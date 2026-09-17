@@ -655,6 +655,8 @@ async fn render_empty_primitives(
         transforms,
         sh_coeffs,
         raw_opacities,
+        empty(),
+        false,
         SplatRenderMode::Default,
         background,
         pass,

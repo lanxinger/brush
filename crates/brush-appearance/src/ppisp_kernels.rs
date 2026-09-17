@@ -60,7 +60,7 @@ pub fn ppisp_fwd_kernel(
     #[comptime] with_crf: bool,
 ) {
     // Flat pixel index from a possibly 2D-tiled grid (see
-    // `calc_cube_count_1d`): a flat `h*w/BLOCK_SIZE` dispatch exceeds the
+    // `calculate_cube_count_elemwise`): a flat `h*w/BLOCK_SIZE` dispatch exceeds the
     // 65535-per-dimension limit above a ~2896px square face. When the grid
     // still fits in one dimension `CUBE_POS_Y == 0`, so this is identical to
     // the old `CUBE_POS_X * BLOCK_SIZE + UNIT_POS_X`.

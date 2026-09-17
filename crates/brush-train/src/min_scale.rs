@@ -1,6 +1,6 @@
 //! One-pass GPU evaluation of the Mip-Splatting world-space scale floor.
 
-use brush_cube::{MainBackendBase, calc_cube_count_1d};
+use brush_cube::MainBackendBase;
 use burn::cubecl;
 use burn::cubecl::{CubeDim, cube, prelude::*};
 use burn::{
@@ -9,11 +9,11 @@ use burn::{
     tensor::{DType, Shape, TensorData},
 };
 use burn_cubecl::{fusion::FusionCubeRuntime, kernel::into_contiguous, tensor::CubeTensor};
+use burn_fusion::custom::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
 use burn_fusion::{
     Fusion, FusionHandle,
     stream::{Operation, StreamId},
 };
-use burn_ir::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
 
 const WORKGROUP_SIZE: u32 = 256;
 
@@ -132,7 +132,11 @@ impl MinScaleOps for MainBackendBase {
         let client = means.client.clone();
         min_scale_kernel::launch(
             &client,
-            calc_cube_count_1d(num_splats, WORKGROUP_SIZE),
+            burn::cubecl::calculate_cube_count_elemwise(
+                &client,
+                num_splats as usize,
+                burn::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
+            ),
             CubeDim::new_1d(WORKGROUP_SIZE),
             means.into_tensor_arg(),
             cameras.into_tensor_arg(),

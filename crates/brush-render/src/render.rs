@@ -10,15 +10,15 @@ use crate::{
     sh::sh_degree_from_coeffs,
     shaders,
 };
-use brush_cube::calc_cube_count_1d;
 use brush_cube::create_tensor;
-use brush_prefix_sum::prefix_sum;
+use brush_scan::prefix_sum;
 use brush_sort::radix_argsort;
 use burn::backend::TensorMetadata;
 use burn::backend::ops::TransactionPrimitive;
 use burn::backend::ops::{FloatTensorOps, IntTensorOps, TransactionOps};
 use burn::backend::tensor::FloatTensor;
 use burn::cubecl::CubeDim;
+use burn::cubecl::calculate_cube_count_elemwise;
 use burn::tensor::{DType, FloatDType, IntDType};
 use burn_cubecl::{CubeBackend, kernel::into_contiguous};
 use glam::{Vec3, uvec2};
@@ -53,6 +53,8 @@ impl SplatOps for CubeBackend {
         transforms: FloatTensor<Self>,
         sh_coeffs: FloatTensor<Self>,
         raw_opacities: FloatTensor<Self>,
+        min_scale: FloatTensor<Self>,
+        has_min_scale: bool,
         _refine_weight: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,
@@ -64,6 +66,8 @@ impl SplatOps for CubeBackend {
             transforms,
             sh_coeffs,
             raw_opacities,
+            min_scale,
+            has_min_scale,
             render_mode,
             background,
             pass,
@@ -81,6 +85,8 @@ impl SplatRasterizerOps for CubeBackend {
         transforms: FloatTensor<Self>,
         sh_coeffs: FloatTensor<Self>,
         raw_opacities: FloatTensor<Self>,
+        min_scale: FloatTensor<Self>,
+        has_min_scale: bool,
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: RasterPass,
@@ -99,6 +105,7 @@ impl SplatRasterizerOps for CubeBackend {
         let transforms = into_contiguous(transforms);
         let sh_coeffs = into_contiguous(sh_coeffs);
         let raw_opacities = into_contiguous(raw_opacities);
+        let min_scale = into_contiguous(min_scale);
 
         DimCheck::new()
             .check_dims("transforms", &transforms, &["D".into(), 10.into()])
@@ -191,7 +198,11 @@ impl SplatRasterizerOps for CubeBackend {
                 );
                 kernels::rasterize::rasterize_kernel::launch(
                     &client,
-                    calc_cube_count_1d(num_tiles * tile_size, tile_size),
+                    burn::cubecl::calculate_cube_count_elemwise(
+                        &client,
+                        (num_tiles * tile_size) as usize,
+                        burn::cubecl::CubeDim::new_1d(tile_size),
+                    ),
                     CubeDim::new_1d(tile_size),
                     compact_gid_from_isect.clone().into_tensor_arg(),
                     tile_offsets.clone().into_tensor_arg(),
@@ -239,6 +250,7 @@ impl SplatRasterizerOps for CubeBackend {
                     num_visible: 0,
                     num_intersections: 0,
                     visible,
+                    opacities: max_radius.clone(),
                     max_radius,
                     tile_offsets,
                     img_size,
@@ -246,12 +258,19 @@ impl SplatRasterizerOps for CubeBackend {
                 projected_splats,
                 compact_gid_from_isect,
                 project_uniforms,
+                compact_from_global: brush_cube::create_tensor_from_slice::<u32>(
+                    &[],
+                    &device,
+                    DType::U32,
+                ),
                 global_from_compact_gid,
             };
         }
 
         let (
             global_from_presort_gid,
+            compact_from_global,
+            opacities,
             depths,
             intersect_counts,
             max_radius,
@@ -268,20 +287,24 @@ impl SplatRasterizerOps for CubeBackend {
             let max_radius = Self::float_zeros([total_splats].into(), &device, FloatDType::F32);
 
             let global_from_presort_gid = create_tensor([total_splats], &device, DType::U32);
+            // Written for every splat by the kernel, so no zero-fill.
+            let compact_from_global = create_tensor([total_splats], &device, DType::U32);
+            let opacities = create_tensor([total_splats], &device, DType::F32);
             let depths = create_tensor([total_splats], &device, DType::F32);
 
             let uniforms = project_uniforms.to_launch_object();
+            let cube_dim = CubeDim::new_1d(kernels::project_forward::WG_SIZE);
 
             kernels::project_forward::project_forward_kernel::launch(
                 &client,
-                calc_cube_count_1d(
-                    project_uniforms.total_splats,
-                    kernels::project_forward::WG_SIZE,
-                ),
-                CubeDim::new_1d(kernels::project_forward::WG_SIZE),
+                calculate_cube_count_elemwise(&client, total_splats, cube_dim),
+                cube_dim,
                 transforms.clone().into_tensor_arg(),
                 raw_opacities.clone().into_tensor_arg(),
+                min_scale.clone().into_tensor_arg(),
                 global_from_presort_gid.clone().into_tensor_arg(),
+                compact_from_global.clone().into_tensor_arg(),
+                opacities.clone().into_tensor_arg(),
                 depths.clone().into_tensor_arg(),
                 num_visible_buf.clone().into_tensor_arg(),
                 intersect_counts.clone().into_tensor_arg(),
@@ -289,12 +312,15 @@ impl SplatRasterizerOps for CubeBackend {
                 max_radius.clone().into_tensor_arg(),
                 uniforms,
                 mip_splat,
+                has_min_scale,
                 camera.camera_model,
                 tile_width,
                 tile_height,
             );
             (
                 global_from_presort_gid,
+                compact_from_global,
+                opacities,
                 depths,
                 intersect_counts,
                 max_radius,
@@ -352,17 +378,21 @@ impl SplatRasterizerOps for CubeBackend {
         );
         tracing::trace_span!("ProjectVisible").in_scope(|| {
             let uniforms = project_uniforms.to_launch_object();
+            let cube_dim = CubeDim::new_1d(kernels::project_visible::WG_SIZE);
             kernels::project_visible::project_visible_kernel::launch(
                 &client,
-                calc_cube_count_1d(num_visible, kernels::project_visible::WG_SIZE),
-                CubeDim::new_1d(kernels::project_visible::WG_SIZE),
+                calculate_cube_count_elemwise(&client, num_visible as usize, cube_dim),
+                cube_dim,
                 transforms.into_tensor_arg(),
                 sh_coeffs.into_tensor_arg(),
                 raw_opacities.into_tensor_arg(),
+                min_scale.into_tensor_arg(),
                 global_from_compact_gid.clone().into_tensor_arg(),
+                compact_from_global.clone().into_tensor_arg(),
                 projected_splats.clone().into_tensor_arg(),
                 uniforms,
                 mip_splat,
+                has_min_scale,
                 sh_degree,
                 camera.camera_model,
             );
@@ -372,10 +402,11 @@ impl SplatRasterizerOps for CubeBackend {
         let tile_id_from_isect = create_tensor([buffer_size], &device, DType::U32);
         let compact_gid_from_isect = create_tensor([buffer_size], &device, DType::U32);
         tracing::trace_span!("MapGaussiansToIntersect").in_scope(|| {
+            let cube_dim = CubeDim::new_1d(kernels::map_gaussians::WG_SIZE);
             kernels::map_gaussians::map_gaussians_to_intersect_kernel::launch(
                 &client,
-                calc_cube_count_1d(num_visible, kernels::map_gaussians::WG_SIZE),
-                CubeDim::new_1d(kernels::map_gaussians::WG_SIZE),
+                calculate_cube_count_elemwise(&client, num_visible as usize, cube_dim),
+                cube_dim,
                 projected_splats.clone().into_tensor_arg(),
                 cum_tiles_hit.clone().into_tensor_arg(),
                 tile_id_from_isect.clone().into_tensor_arg(),
@@ -399,7 +430,11 @@ impl SplatRasterizerOps for CubeBackend {
         tracing::trace_span!("GetTileOffsets").in_scope(|| {
             get_tile_offsets::launch(
                 &client,
-                calc_cube_count_1d(num_intersections, cube_dim.x * CHECKS_PER_ITER),
+                calculate_cube_count_elemwise(
+                    &client,
+                    num_intersections as usize,
+                    CubeDim::new_1d(cube_dim.x * CHECKS_PER_ITER),
+                ),
                 cube_dim,
                 num_intersections,
                 num_tiles,
@@ -459,9 +494,14 @@ impl SplatRasterizerOps for CubeBackend {
                 background.y,
                 background.z,
             );
+            // One cube per tile, one thread per pixel in it.
             kernels::rasterize::rasterize_kernel::launch(
                 &client,
-                calc_cube_count_1d(num_tiles * tile_size, tile_size),
+                burn::cubecl::calculate_cube_count_elemwise(
+                    &client,
+                    (num_tiles * tile_size) as usize,
+                    burn::cubecl::CubeDim::new_1d(tile_size),
+                ),
                 CubeDim::new_1d(tile_size),
                 compact_gid_from_isect.clone().into_tensor_arg(),
                 tile_offsets.clone().into_tensor_arg(),
@@ -527,6 +567,7 @@ impl SplatRasterizerOps for CubeBackend {
                 num_intersections,
                 visible,
                 max_radius,
+                opacities,
                 tile_offsets,
                 img_size,
             },
@@ -534,6 +575,7 @@ impl SplatRasterizerOps for CubeBackend {
             compact_gid_from_isect,
             project_uniforms,
             global_from_compact_gid,
+            compact_from_global,
         }
     }
 }

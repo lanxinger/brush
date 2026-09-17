@@ -1,9 +1,5 @@
-//! Coalesced dense spherical-harmonic gradient materialization.
-//!
-//! One 32-lane SIMD plane owns one global splat row. The project backward
-//! pass is followed by a compact-gradient lookup for contributing splats;
-//! every row is written exactly once, including exact zeros for
-//! non-contributors.
+//! Coalesced compact spherical-harmonic gradients.
+//! One SIMD plane writes each visible row plus the zero sentinel.
 
 use crate::kernels::sh::{num_sh_coeffs, sh_basis, sh_color_component};
 use crate::kernels::types::ProjectUniforms;
@@ -15,60 +11,28 @@ pub const PLANE_SIZE: u32 = 32;
 pub const WG_SIZE: u32 = 256;
 pub const SPLATS_PER_WG: u32 = WG_SIZE / PLANE_SIZE;
 
-/// Invert the compact-to-global projection map for rows with a non-zero SH
-/// coefficient gradient. Keeping this as a candidate-only pass preserves the
-/// original ProjectBackwards storage-buffer signature on every fallback.
 #[cube(launch)]
-pub fn build_compact_sh_map_kernel(
-    global_from_compact_gid: &Tensor<u32>,
-    v_combined: &Tensor<f32>,
-    compact_plus_one_from_global: &mut Tensor<u32>,
-    u: ProjectUniforms,
-) {
-    let compact_gid = ABSOLUTE_POS as u32;
-    if compact_gid >= u.num_visible {
-        terminate!();
-    }
-
-    let grad_base = (compact_gid * 10u32) as usize;
-    let v_color_r = v_combined[grad_base + 5];
-    let v_color_g = v_combined[grad_base + 6];
-    let v_color_b = v_combined[grad_base + 7];
-    if v_color_r != 0.0f32 || v_color_g != 0.0f32 || v_color_b != 0.0f32 {
-        let global_gid = global_from_compact_gid[compact_gid as usize];
-        compact_plus_one_from_global[global_gid as usize] = compact_gid + 1u32;
-    }
-}
-
-#[cube(launch, launch_unchecked)]
 pub fn materialize_sh_grad_kernel(
     transforms: &Tensor<f32>,
-    compact_plus_one_from_global: &Tensor<u32>,
+    global_from_compact_gid: &Tensor<u32>,
     v_combined: &Tensor<f32>,
     v_coeffs: &mut Tensor<f32>,
     u: ProjectUniforms,
     #[comptime] sh_degree: u32,
 ) {
-    let global_gid = CUBE_POS as u32 * SPLATS_PER_WG + PLANE_POS;
+    let row = CUBE_POS as u32 * SPLATS_PER_WG + PLANE_POS;
     let lane = UNIT_POS_PLANE;
-    let active = global_gid < u.total_splats;
-
-    let mut compact_plus_one = 0u32;
-    if active && lane == 0u32 {
-        compact_plus_one = compact_plus_one_from_global[global_gid as usize];
-    }
-    compact_plus_one = plane_broadcast(compact_plus_one, 0u32);
-    let has_grad = compact_plus_one > 0u32;
-    let compact_gid = max(compact_plus_one, 1u32) - 1u32;
+    let active = row <= u.num_visible;
+    let has_grad = active && row > 0u32;
+    let compact_gid = max(row, 1u32) - 1u32;
     let row_len = comptime![num_sh_coeffs(sh_degree) * 3u32];
-    let row_base = global_gid * row_len;
+    let row_base = row * row_len;
     let index_0 = lane;
     let index_1 = lane + PLANE_SIZE;
     let index_2 = lane + 2u32 * PLANE_SIZE;
 
-    // Most global splats do not contribute to the sampled view. Their dense
-    // rows still need exact zeros for Adam's momentum decay, but they do not
-    // need any SH polynomial or SIMD shuffle work.
+    // Row zero supplies exact zeros for culled splats. Inactive planes
+    // skip all SH polynomial and shuffle work.
     if !has_grad {
         if active && index_0 < row_len {
             v_coeffs[(row_base + index_0) as usize] = 0.0f32;
@@ -82,6 +46,7 @@ pub fn materialize_sh_grad_kernel(
         terminate!();
     }
 
+    let global_gid = global_from_compact_gid[compact_gid as usize];
     let mut field = 0.0f32;
     let transform_base = (global_gid * 10u32) as usize;
     let grad_base = (compact_gid * 10u32) as usize;

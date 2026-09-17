@@ -4,7 +4,7 @@
 //! gradient row to the scalar second moment, then updates the full first
 //! moment and parameter row without materialising intermediate tensors.
 
-use brush_cube::{MainBackendBase, calc_cube_count_1d};
+use brush_cube::MainBackendBase;
 use brush_render::shaders::helpers::ProjectUniforms;
 use burn::cubecl::features::Plane;
 use burn::{
@@ -17,11 +17,11 @@ use burn::{
     tensor::{DType, Int, IntDType, Shape},
 };
 use burn_cubecl::{fusion::FusionCubeRuntime, kernel::into_contiguous, tensor::CubeTensor};
+use burn_fusion::custom::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
 use burn_fusion::{
     Fusion, FusionHandle,
     stream::{Operation, StreamId},
 };
-use burn_ir::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
 
 const PLANE_SIZE: u32 = 32;
 const WORKGROUP_SIZE: u32 = 256;
@@ -606,7 +606,11 @@ impl ShAdamOps for MainBackendBase {
 
         let num_splats = u32::try_from(dims[0]).expect("splat count exceeds u32");
         let row_len = u32::try_from(dims[1] * dims[2]).expect("SH row exceeds u32");
-        let workgroups = calc_cube_count_1d(num_splats, SPLATS_PER_WORKGROUP);
+        let workgroups = burn::cubecl::calculate_cube_count_elemwise(
+            &param.client,
+            num_splats as usize,
+            burn::cubecl::CubeDim::new_1d(SPLATS_PER_WORKGROUP),
+        );
         let out_param = empty_like(&param);
         let out_moment_1 = empty_like(&moment_1);
         let out_moment_2 = empty_like(&moment_2);
@@ -781,7 +785,11 @@ impl ShAdamOps for MainBackendBase {
             tracing::trace_span!("BuildSparseShMap").in_scope(|| {
                 kernel::build_compact_sh_map_kernel::launch(
                     &client,
-                    calc_cube_count_1d(render.num_visible, WORKGROUP_SIZE),
+                    burn::cubecl::calculate_cube_count_elemwise(
+                        &client,
+                        (render.num_visible) as usize,
+                        burn::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
+                    ),
                     burn::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
                     global_from_compact_gid.into_tensor_arg(),
                     compact_grads.clone().into_tensor_arg(),
@@ -802,7 +810,11 @@ impl ShAdamOps for MainBackendBase {
             unsafe {
                 kernel::sparse_sh_adam_kernel::launch_unchecked(
                     &client,
-                    calc_cube_count_1d(num_splats, SPLATS_PER_WORKGROUP),
+                    burn::cubecl::calculate_cube_count_elemwise(
+                        &client,
+                        num_splats as usize,
+                        burn::cubecl::CubeDim::new_1d(SPLATS_PER_WORKGROUP),
+                    ),
                     burn::cubecl::CubeDim::new_1d(WORKGROUP_SIZE),
                     param.into_tensor_arg(),
                     render_transforms.into_tensor_arg(),

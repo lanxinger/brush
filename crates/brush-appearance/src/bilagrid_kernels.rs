@@ -189,7 +189,7 @@ pub fn bilagrid_slice_fwd_kernel(
     #[comptime] has_alpha: bool,
 ) {
     // Flat pixel index from a possibly 2D-tiled grid (see
-    // `calc_cube_count_1d`). Identical to the old 1D form whenever the
+    // `calculate_cube_count_elemwise`). Identical to the old 1D form whenever the
     // grid still fits one dimension, since then `CUBE_POS_Y == 0`.
     let pixel = (CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X) * BLOCK_SIZE + UNIT_POS_X;
     if pixel >= image_h * image_w {
@@ -253,7 +253,7 @@ pub fn bilagrid_slice_bwd_kernel<A: AtomicAddF32>(
     #[comptime] has_alpha: bool,
 ) {
     // Flat pixel index from a possibly 2D-tiled grid (see
-    // `calc_cube_count_1d`). Identical to the old 1D form whenever the
+    // `calculate_cube_count_elemwise`). Identical to the old 1D form whenever the
     // grid still fits one dimension, since then `CUBE_POS_Y == 0`.
     let pixel = (CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X) * BLOCK_SIZE + UNIT_POS_X;
     if pixel >= image_h * image_w {

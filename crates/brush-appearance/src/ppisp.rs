@@ -127,7 +127,11 @@ fn launch_fwd(
         // 2D-tiled: a flat `h*w/BLOCK_SIZE` grid blows the 65535-per-dimension
         // dispatch limit above a ~2896px square face. Stays exactly
         // `(n, 1, 1)` while it fits, so small dispatches are unchanged.
-        brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE),
+        burn::cubecl::calculate_cube_count_elemwise(
+            &client,
+            (h * w) as usize,
+            burn::cubecl::CubeDim::new_1d(kernels::BLOCK_SIZE),
+        ),
         CubeDim::new_1d(kernels::BLOCK_SIZE),
         exposure.into_tensor_arg(),
         vignetting.into_tensor_arg(),
@@ -182,7 +186,11 @@ fn launch_bwd(
         &client,
         // Same 2D tiling as the forward. `partials` keeps exactly `num_cubes`
         // rows; the tail cubes the tiling adds skip the write (see kernel).
-        brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE),
+        burn::cubecl::calculate_cube_count_elemwise(
+            &client,
+            (h * w) as usize,
+            burn::cubecl::CubeDim::new_1d(kernels::BLOCK_SIZE),
+        ),
         CubeDim::new_1d(kernels::BLOCK_SIZE),
         exposure.into_tensor_arg(),
         vignetting.into_tensor_arg(),
@@ -493,20 +501,20 @@ pub fn ppisp_apply(
 
     let prep = PpispBackward
         .prepare::<NoCheckpointing>([
-            exp_ad.node.clone(),
-            vig_ad.node.clone(),
-            color_ad.node.clone(),
-            crf_ad.node.clone(),
-            rgb_ad.node.clone(),
+            exp_ad.node(),
+            vig_ad.node(),
+            color_ad.node(),
+            crf_ad.node(),
+            rgb_ad.node(),
         ])
         .compute_bound()
         .stateful();
 
-    let exp_p = exp_ad.primitive;
-    let vig_p = vig_ad.primitive;
-    let color_p = color_ad.primitive;
-    let crf_p = crf_ad.primitive;
-    let rgb_p = rgb_ad.primitive;
+    let exp_p = exp_ad.into_primitive();
+    let vig_p = vig_ad.into_primitive();
+    let color_p = color_ad.into_primitive();
+    let crf_p = crf_ad.into_primitive();
+    let rgb_p = rgb_ad.into_primitive();
 
     let out = <MainBackend as PpispOps<MainBackend>>::ppisp_fwd(
         exp_p.clone(),

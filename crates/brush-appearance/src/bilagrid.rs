@@ -94,7 +94,11 @@ fn launch_slice_fwd(grids: CubeTensor, rgb: CubeTensor, view_idx: usize) -> Cube
     let client = rgb.client.clone();
     kernels::bilagrid_slice_fwd_kernel::launch(
         &client,
-        brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE),
+        burn::cubecl::calculate_cube_count_elemwise(
+            &client,
+            (h * w) as usize,
+            burn::cubecl::CubeDim::new_1d(kernels::BLOCK_SIZE),
+        ),
         CubeDim::new_1d(kernels::BLOCK_SIZE),
         grids.into_tensor_arg(),
         rgb.into_tensor_arg(),
@@ -130,7 +134,11 @@ fn launch_slice_bwd(
     let grad_rgb = alloc_zeros(&rgb, rgb.shape(), DType::F32);
     let client = rgb.client.clone();
 
-    let cube_count = brush_cube::calc_cube_count_1d(h * w, kernels::BLOCK_SIZE);
+    let cube_count = burn::cubecl::calculate_cube_count_elemwise(
+        &client,
+        (h * w) as usize,
+        burn::cubecl::CubeDim::new_1d(kernels::BLOCK_SIZE),
+    );
     let cube_dim = CubeDim::new_1d(kernels::BLOCK_SIZE);
     let grid_offset = view_idx as u32 * 12 * gl * gh * gw;
     if brush_cube::supports_float_atomics(&client) {
@@ -294,12 +302,12 @@ pub fn bilagrid_apply(grids: Tensor<5>, rgb: Tensor<3>, view_idx: usize) -> Tens
     let rgb_ad = unwrap_ad_wgpu_float(rgb);
 
     let prep = BilagridSliceBackward
-        .prepare::<NoCheckpointing>([grids_ad.node.clone(), rgb_ad.node.clone()])
+        .prepare::<NoCheckpointing>([grids_ad.node(), rgb_ad.node()])
         .compute_bound()
         .stateful();
 
-    let grids_p = grids_ad.primitive;
-    let rgb_p = rgb_ad.primitive;
+    let grids_p = grids_ad.into_primitive();
+    let rgb_p = rgb_ad.into_primitive();
     let out = <MainBackend as BilagridOps<MainBackend>>::bilagrid_slice_fwd(
         grids_p.clone(),
         rgb_p.clone(),

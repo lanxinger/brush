@@ -571,13 +571,20 @@ async fn tiny_training_runs_stay_finite() {
             &device,
             BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
         );
-        let mut splats = generate_test_splats(&device, 100);
+        // Like the training loop: splats live on the inner device and are
+        // lifted to autodiff for each step, so refine sees plain leaves.
+        let mut splats = generate_test_splats(&device, 100).valid();
         for iter in 0..3 {
-            let (new_splats, _) = trainer.step(batch.clone(), splats).await;
+            let (new_splats, _) = trainer
+                .step(
+                    batch.clone(),
+                    brush_render::bwd::lift_splats_to_autodiff(splats),
+                )
+                .await;
             // Match the process: refine on the plain device, then lift for
             // the next step so optimizer state stays outside autodiff.
             let (new_splats, _) = trainer.refine(iter, new_splats.valid()).await;
-            splats = brush_render::bwd::lift_splats_to_autodiff(new_splats);
+            splats = new_splats;
         }
         assert!(
             all_finite(&splats).await,
@@ -608,26 +615,41 @@ async fn growth_waits_for_start_iter() {
         BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
     );
 
-    let mut splats = generate_test_splats(&device, 100);
+    let mut splats = generate_test_splats(&device, 100).valid();
     for _ in 0..5 {
-        let (new_splats, _) = trainer.step(batch.clone(), splats).await;
-        splats = new_splats;
+        let (new_splats, _) = trainer
+            .step(
+                batch.clone(),
+                brush_render::bwd::lift_splats_to_autodiff(splats),
+            )
+            .await;
+        splats = new_splats.valid();
     }
     let (splats, before) = trainer.refine(500, splats.valid()).await;
     assert_eq!(before.num_split_high_grad, 0);
 
-    let mut splats = brush_render::bwd::lift_splats_to_autodiff(splats);
+    let mut splats = splats;
     for _ in 0..5 {
-        let (new_splats, _) = trainer.step(batch.clone(), splats).await;
-        splats = new_splats;
+        let (new_splats, _) = trainer
+            .step(
+                batch.clone(),
+                brush_render::bwd::lift_splats_to_autodiff(splats),
+            )
+            .await;
+        splats = new_splats.valid();
     }
     let (splats, inside) = trainer.refine(1500, splats.valid()).await;
     assert!(inside.num_split_high_grad > 0);
 
-    let mut splats = brush_render::bwd::lift_splats_to_autodiff(splats);
+    let mut splats = splats;
     for _ in 0..5 {
-        let (new_splats, _) = trainer.step(batch.clone(), splats).await;
-        splats = new_splats;
+        let (new_splats, _) = trainer
+            .step(
+                batch.clone(),
+                brush_render::bwd::lift_splats_to_autodiff(splats),
+            )
+            .await;
+        splats = new_splats.valid();
     }
     let (_, after) = trainer.refine(2500, splats.valid()).await;
     assert_eq!(after.num_split_high_grad, 0);
