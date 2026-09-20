@@ -47,6 +47,8 @@ brush-cube = { path = "../brush-cube" }
 brush-render = { path = "../brush-render", features = ["debug-validation"] }
 
 burn-wgpu.workspace = true
+# FusionInspector reports the execution plans asserted by tests/fusion.rs.
+burn-fusion = { workspace = true, features = ["test-util"] }
 bytemuck.workspace = true
 
 wasm-bindgen-test = "0.3"

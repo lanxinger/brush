@@ -25,7 +25,7 @@ mod native {
     };
     use brush_vfs::BrushVfs;
     use burn::{
-        module::AutodiffModule,
+        module::Module,
         prelude::Device,
         tensor::{Tensor, TensorData},
     };

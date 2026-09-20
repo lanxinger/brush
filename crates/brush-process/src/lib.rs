@@ -13,7 +13,7 @@ pub type ProcessDevice = burn::tensor::Device;
 pub fn default_device() -> ProcessDevice {
     try_device()
         .cloned()
-        .unwrap_or_else(|| WgpuDevice::DefaultDevice.into())
+        .unwrap_or_else(|| WgpuDevice::default().into())
 }
 
 /// Git-derived identifier for the source used to build Brush.
@@ -57,10 +57,9 @@ fn burn_options() -> RuntimeOptions {
 /// contends with GUI work on the same queue. wgpu needs an explicit setup so
 /// the adapter and limits are chosen before any kernel runs.
 async fn open_device() -> RegisteredDevice {
-    burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::DefaultDevice, burn_options())
-        .await;
+    burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::default(), burn_options()).await;
     RegisteredDevice {
-        burn: WgpuDevice::DefaultDevice.into(),
+        burn: WgpuDevice::default().into(),
         host: None,
     }
 }

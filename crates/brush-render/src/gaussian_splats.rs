@@ -547,7 +547,7 @@ pub async fn render_splats_with_rasterizer(
 #[cfg(test)]
 mod min_scale_fold_tests {
     use super::*;
-    use burn::module::AutodiffModule;
+    use burn::module::Module;
 
     /// A standard training lift must track every parameter, including after
     /// `valid()` round trips and scale-floor baking on the plain device.

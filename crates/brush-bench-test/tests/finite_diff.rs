@@ -858,7 +858,7 @@ async fn min_scale_floor_in_kernel_matches_host_bake() {
 #[tokio::test]
 async fn scaled_viewer_floor_matches_baked_splats() {
     use brush_render::gaussian_splats::{TextureMode, render_splats_with_rasterizer};
-    use burn::module::AutodiffModule;
+    use burn::module::Module;
     let device =
         burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let scene = base_scene();

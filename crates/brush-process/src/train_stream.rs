@@ -19,7 +19,7 @@ use brush_train::{
     train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds},
 };
 use brush_vfs::BrushVfs;
-use burn::module::AutodiffModule;
+use burn::module::Module;
 use rand::SeedableRng;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
