@@ -383,12 +383,14 @@ async fn deferred_sh_bridge_preserves_other_gradients_and_aux() {
             Vec3::ZERO,
             compute_refine_weight,
             true,
+            true,
         )
         .await;
         let num_visible = deferred.num_visible;
         let deferred_visible = read_vec(deferred.visible.clone()).await;
         let deferred_radius = read_vec(deferred.max_radius.clone()).await;
         let deferred_refine_holder = deferred.refine_weight_holder;
+        let deferred_moment_holder = deferred.coeffs_grad_sq_holder;
         let deferred_handle = deferred
             .deferred_sh_grad
             .expect("deferred render must return its gradient handle");
@@ -402,6 +404,10 @@ async fn deferred_sh_bridge_preserves_other_gradients_and_aux() {
             read_vec(deferred_splats.raw_opacities.grad(&deferred_grads).unwrap()).await;
 
         assert!(deferred_splats.sh_coeffs.grad(&deferred_grads).is_none());
+        assert!(
+            deferred_moment_holder.grad(&deferred_grads).is_none(),
+            "deferred SH must not compute an unused compact second moment"
+        );
         assert_eq!(
             sparse.compact_grads.dims(),
             [num_visible.max(1) as usize, 10]
@@ -456,6 +462,7 @@ async fn deferred_sh_request_falls_back_to_dense_off_native_msl() {
         Vec3::ZERO,
         false,
         true,
+        false,
     )
     .await;
 

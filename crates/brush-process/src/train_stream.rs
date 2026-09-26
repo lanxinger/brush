@@ -1,7 +1,6 @@
 use crate::{
     Emitter,
     config::TrainStreamConfig,
-    device_memory_cleanup, device_memory_usage,
     message::{ProcessMessage, TrainMessage},
     slot::SlotSender,
 };
@@ -179,7 +178,7 @@ pub(crate) async fn train_stream(
     emitter.emit(ProcessMessage::DoneLoading).await;
 
     // Start with memory cleared out.
-    device_memory_cleanup(device);
+    device.memory_cleanup();
 
     let mut eval_scene = dataset.eval;
 
@@ -335,7 +334,7 @@ pub(crate) async fn train_stream(
             let after = splats.num_splats();
             log::info!("LOD {current_lod}/{lod_levels}: {before} -> {after} splats");
 
-            device_memory_cleanup(device);
+            device.memory_cleanup();
 
             // Only rebuild the loader when the images actually changed size.
             // A rebuild throws away a warm batch cache and re-decodes the
@@ -409,7 +408,7 @@ pub(crate) async fn train_stream(
             splats = new_splats;
             // Cleanup the concrete training device after refinement releases
             // its temporary buffers.
-            device_memory_cleanup(device);
+            device.memory_cleanup();
             refine_stats
         } else {
             RefineStats {
@@ -557,7 +556,7 @@ pub(crate) async fn train_stream(
             if rerun_config.rerun_enabled
                 && (iter.is_multiple_of(rerun_config.rerun_log_train_stats_every) || is_last_step)
             {
-                visualize.log_memory(iter, &device_memory_usage(device).unwrap_or_default())?;
+                visualize.log_memory(iter, &device.memory_pool_usage().unwrap_or_default())?;
             }
 
             if refine.num_added > 0 {

@@ -8,7 +8,8 @@
 //!
 //! Note burn keeps each gather in its own block rather than folding it into
 //! the optimizer's kernel, so a dense gradient per parameter is still
-//! written once. That is the current behaviour, not the goal.
+//! written once. The portable SH second moment is also gathered after reducing
+//! compact rows; native fused SH Adam calculates that statistic internally.
 
 #![cfg(not(target_family = "wasm"))]
 
@@ -22,7 +23,7 @@ use brush_render::{
 };
 use brush_train::{config::TrainConfig, train::SplatTrainer};
 use burn::backend::ir::{BaseOperationIr, OperationIr};
-use burn::tensor::{Device, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 use burn_fusion::inspect::{FusionInspector, FusionReport};
 use burn_fusion::stream::StreamId;
 use glam::{Quat, Vec3};
@@ -70,10 +71,10 @@ fn test_batch(width: u32, height: u32) -> SceneBatch {
         view_index: 0,
         alpha_mode: AlphaMode::Transparent,
         camera: Camera::new(
-            Vec3::new(0.0, 0.0, 3.0),
+            Vec3::new(0.0, 0.0, -3.0),
             Quat::IDENTITY,
-            45.0,
-            45.0,
+            0.6,
+            0.6,
             glam::vec2(0.5, 0.5),
             Pinhole,
         ),
@@ -85,11 +86,13 @@ fn is_select(op: &OperationIr) -> bool {
     matches!(op, OperationIr::BaseFloat(BaseOperationIr::Select(_)))
 }
 
-/// `transforms`, `sh_coeffs`, `raw_opacities` and the refine-weight holder.
+/// `transforms`, `sh_coeffs`, `raw_opacities`, and the refine-weight holder.
 const GRADIENT_PARAMS: usize = 4;
+/// Portable Adam additionally consumes the compactly reduced SH second moment.
+const PORTABLE_GRADIENT_EXPANSIONS: usize = GRADIENT_PARAMS + 1;
 
 #[tokio::test]
-async fn gradient_gathers_use_one_fused_kernel_per_parameter() {
+async fn gradient_expansions_are_fused() {
     let device =
         burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let config = TrainConfig::default();
@@ -105,11 +108,22 @@ async fn gradient_gathers_use_one_fused_kernel_per_parameter() {
     for _ in 0..2 {
         (splats, _) = trainer.step(test_batch(32, 32), splats).await;
     }
+    // Native SH updates are separate lazy custom ops. Read all parameters so
+    // the measured forward cannot pull the last warmup update into its trace.
+    execute(splats.transforms.val()).await;
+    execute(splats.sh_coeffs.val()).await;
+    execute(splats.raw_opacities.val()).await;
 
     let inspector = FusionInspector::install(StreamId::current());
-    let (splats, _stats) = trainer.step(test_batch(32, 32), splats).await;
-    // Force the queue to run so every plan is reported.
-    let _ = splats.means().into_data_async().await.expect("readback");
+    let (splats, stats) = trainer.step(test_batch(32, 32), splats).await;
+    assert!(
+        stats.num_visible > 0 && stats.num_visible < splats.num_splats(),
+        "the fusion fixture must contain both visible and culled splats"
+    );
+    // Reading means alone does not force an independent native SH update.
+    execute(splats.transforms.val()).await;
+    execute(splats.sh_coeffs.val()).await;
+    execute(splats.raw_opacities.val()).await;
 
     let reports = inspector.drain();
     assert!(
@@ -117,9 +131,42 @@ async fn gradient_gathers_use_one_fused_kernel_per_parameter() {
         "inspector saw no execution plans; is the step running on this stream?"
     );
 
+    let native_sh_updates = reports
+        .iter()
+        .flat_map(|report| &report.blocks)
+        .flat_map(|block| &block.operations)
+        .filter_map(|op| match op {
+            OperationIr::Custom(custom)
+                if custom.id == "fused_sh_adam" || custom.id == "sparse_sh_adam" =>
+            {
+                Some(custom.id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        native_sh_updates.len() <= 1,
+        "one SH update per training step, saw {native_sh_updates:?}:\n{}",
+        reports
+            .iter()
+            .map(FusionReport::format_table)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // Require the exact native kernel in the trace before allowing an omitted
+    // gather. Compiling native-MSL or requesting it does not prove eligibility.
+    let expected = match native_sh_updates.first().copied() {
+        Some("sparse_sh_adam") => GRADIENT_PARAMS - 1,
+        Some("fused_sh_adam") => GRADIENT_PARAMS,
+        _ => PORTABLE_GRADIENT_EXPANSIONS,
+    };
+    assert_gradient_expansions(&reports, expected);
+}
+
+fn assert_gradient_expansions(reports: &[FusionReport], expected: usize) {
     let mut gathers = 0;
     let mut unfused = Vec::new();
-    for report in &reports {
+    for report in reports {
         for block in &report.blocks {
             let selects = block.operations.iter().filter(|op| is_select(op)).count();
             gathers += selects;
@@ -136,8 +183,8 @@ async fn gradient_gathers_use_one_fused_kernel_per_parameter() {
     );
     assert_eq!(
         gathers,
-        GRADIENT_PARAMS,
-        "expected one gather per parameter; more means the expansion grew \
+        expected,
+        "expected one gather per consumed parameter/statistic; more means the expansion grew \
          extra ops, fewer means a gradient stopped reaching its parameter:\n{}",
         reports
             .iter()
@@ -145,4 +192,68 @@ async fn gradient_gathers_use_one_fused_kernel_per_parameter() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+async fn execute<const D: usize>(tensor: Tensor<D>) {
+    let _ = tensor.into_data_async().await.expect("gradient readback");
+}
+
+#[tokio::test]
+async fn explicitly_requested_compact_moment_expansion_is_fused() {
+    let device = Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let splats = test_splats(&device, 256);
+    let batch = test_batch(32, 32);
+    let output = brush_render::bwd::render_splats_for_training(
+        splats.clone(),
+        &batch.camera,
+        glam::uvec2(32, 32),
+        Vec3::ZERO,
+        true,
+        false,
+        true,
+    )
+    .await;
+    assert!(
+        output.num_visible > 0 && output.num_visible < splats.num_splats(),
+        "the fusion fixture must contain both visible and culled splats"
+    );
+    execute(output.img.clone()).await;
+    let inspector = FusionInspector::install(StreamId::current());
+    let mut grads = output.img.mean().backward();
+    execute(
+        splats
+            .transforms
+            .grad_remove(&mut grads)
+            .expect("transforms gradient"),
+    )
+    .await;
+    execute(
+        splats
+            .sh_coeffs
+            .grad_remove(&mut grads)
+            .expect("SH gradient"),
+    )
+    .await;
+    execute(
+        splats
+            .raw_opacities
+            .grad_remove(&mut grads)
+            .expect("opacity gradient"),
+    )
+    .await;
+    execute(
+        output
+            .refine_weight_holder
+            .grad_remove(&mut grads)
+            .expect("refine gradient"),
+    )
+    .await;
+    execute(
+        output
+            .coeffs_grad_sq_holder
+            .grad_remove(&mut grads)
+            .expect("SH second moment"),
+    )
+    .await;
+    assert_gradient_expansions(&inspector.drain(), PORTABLE_GRADIENT_EXPANSIONS);
 }

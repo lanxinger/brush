@@ -54,12 +54,13 @@ fn step_param<const D: usize>(
     param: Param<Tensor<D>>,
     state: &mut AdamState<D>,
     grads: &mut Gradients,
+    grad_sq_mean: Option<Tensor<D>>,
 ) -> Param<Tensor<D>> {
     param.map(|t| {
         let Some(grad) = t.grad_remove(grads) else {
             return t;
         };
-        let stepped = adam.step(lr, t.inner(), &grad, state);
+        let stepped = adam.step(lr, t.inner(), &grad, grad_sq_mean, state);
         Tensor::from_inner(stepped).require_grad()
     })
 }
@@ -117,6 +118,30 @@ fn can_defer_sh_grad(_optimizer: &SplatOptim, _splats: &Splats) -> bool {
     false
 }
 
+#[cfg(all(
+    feature = "native-msl",
+    target_os = "macos",
+    target_arch = "aarch64",
+    not(target_family = "wasm")
+))]
+fn can_fuse_sh_adam(optimizer: &SplatOptim, splats: &Splats) -> bool {
+    use brush_render::burn_glue::detach_autodiff;
+    AdamScaled::fused_sh_compatible(
+        &detach_autodiff(splats.sh_coeffs.val()),
+        &optimizer.sh_coeffs,
+    )
+}
+
+#[cfg(not(all(
+    feature = "native-msl",
+    target_os = "macos",
+    target_arch = "aarch64",
+    not(target_family = "wasm")
+)))]
+fn can_fuse_sh_adam(_optimizer: &SplatOptim, _splats: &Splats) -> bool {
+    false
+}
+
 pub struct SplatTrainer {
     config: TrainConfig,
     /// Per-step multiplier of the exponential mean-LR schedule:
@@ -162,10 +187,11 @@ fn step_sh_coeffs(
     state: &mut AdamState<3>,
     grads: &mut Gradients,
     deferred: Option<DeferredShGrad>,
+    grad_sq_mean: Option<Tensor<3>>,
     learning_rate: f64,
 ) -> Param<Tensor<3>> {
     let Some(deferred) = deferred else {
-        return step_param(adam, learning_rate, param, state, grads);
+        return step_param(adam, learning_rate, param, state, grads, grad_sq_mean);
     };
 
     use brush_render::burn_glue::{detach_autodiff, lift_to_autodiff};
@@ -203,6 +229,7 @@ fn step_sh_coeffs(
     state: &mut AdamState<3>,
     grads: &mut Gradients,
     deferred: Option<DeferredShGrad>,
+    grad_sq_mean: Option<Tensor<3>>,
     learning_rate: f64,
 ) -> Param<Tensor<3>> {
     debug_assert!(
@@ -210,7 +237,7 @@ fn step_sh_coeffs(
         "non-native builds must never request deferred SH gradients"
     );
     drop(deferred);
-    step_param(adam, learning_rate, param, state, grads)
+    step_param(adam, learning_rate, param, state, grads, grad_sq_mean)
 }
 
 pub async fn get_splat_bounds(splats: Splats, percentile: f32) -> BoundingBox {
@@ -453,6 +480,11 @@ impl SplatTrainer {
             .optim
             .as_ref()
             .is_some_and(|optimizer| can_defer_sh_grad(optimizer, &splats));
+        let compute_coeffs_grad_sq = !defer_sh_grad
+            && !self
+                .optim
+                .as_ref()
+                .is_some_and(|optimizer| can_fuse_sh_adam(optimizer, &splats));
 
         // Lift the active view's appearance params onto the autodiff graph
         // for this step.
@@ -469,7 +501,17 @@ impl SplatTrainer {
         let lr_scaling =
             self.lr_scaling_fixed.clone() + self.lr_mean_columns.clone() * lr_mean as f32;
 
-        let (mut grads, visible, opacities, num_visible, loss_inner, deferred_sh_grad) = {
+        let (
+            mut grads,
+            visible,
+            opacities,
+            num_visible,
+            loss_inner,
+            deferred_sh_grad,
+            refine_weight,
+            max_radius,
+            coeffs_grad_sq,
+        ) = {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
             let render_input = splats.clone();
@@ -480,6 +522,7 @@ impl SplatTrainer {
                 background,
                 compute_refine_weight,
                 defer_sh_grad,
+                compute_coeffs_grad_sq,
             )
             .instrument(trace_span!("Forward"))
             .await;
@@ -563,27 +606,19 @@ impl SplatTrainer {
                     .expect("deferred SH gradient holder was not populated")
             });
 
-            trace_span!("Housekeeping").in_scope(|| {
-                // Refine state and auxiliary tensors stay on the inner device.
-                let device = splats.device().inner();
-                let record = self
-                    .refine_record
-                    .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
-                // `visible` / `max_radius` already arrive on the inner backend;
-                // only a freshly-extracted `refine_weight` gradient needs the
-                // autodiff stripped off. Once growth stops, it is no longer
-                // consumed, but visibility and screen size still feed pruning
-                // and oversized-splat splitting.
-                if compute_refine_weight {
-                    let refine_weight = refine_weight_holder
-                        .grad_remove(&mut grads)
-                        .expect("XY gradients need to be calculated.")
-                        .without_autodiff();
-                    record.gather_stats(refine_weight, visible.clone(), max_radius);
-                } else {
-                    record.gather_aux_stats(visible.clone(), max_radius);
-                }
+            let refine_weight = compute_refine_weight.then(|| {
+                refine_weight_holder
+                    .grad_remove(&mut grads)
+                    .expect("XY gradients need to be calculated.")
+                    .without_autodiff()
             });
+            // Portable backward reduces the compact SH rows before gathering,
+            // avoiding a dense squared-gradient allocation for Adam. Native
+            // paths can leave this absent and compute their own statistic.
+            let coeffs_grad_sq = diff_out
+                .coeffs_grad_sq_holder
+                .grad_remove(&mut grads)
+                .map(Tensor::without_autodiff);
 
             (
                 grads,
@@ -592,6 +627,9 @@ impl SplatTrainer {
                 diff_out.num_visible,
                 loss_inner,
                 deferred_sh_grad,
+                refine_weight,
+                max_radius,
+                coeffs_grad_sq,
             )
         };
 
@@ -630,6 +668,7 @@ impl SplatTrainer {
                     splats.transforms,
                     &mut optimizer.transforms,
                     &mut grads,
+                    None,
                 )
             });
             splats.sh_coeffs = trace_span!("SH Coeffs step").in_scope(|| {
@@ -639,6 +678,7 @@ impl SplatTrainer {
                     &mut optimizer.sh_coeffs,
                     &mut grads,
                     deferred_sh_grad,
+                    coeffs_grad_sq,
                     self.config.lr_coeffs_dc,
                 )
             });
@@ -649,6 +689,7 @@ impl SplatTrainer {
                     splats.raw_opacities,
                     &mut optimizer.opacities,
                     &mut grads,
+                    None,
                 )
             });
             splats
@@ -663,36 +704,42 @@ impl SplatTrainer {
             });
         }
 
-        // Add random noise. Only do this in the growth phase, otherwise
-        // let the splats settle in without noise, not much point in exploring regions anymore.
-        // The noise gate is non-differentiable bookkeeping. The forward
-        // already computed every splat's floored opacity, on the inner device,
-        // so nothing here builds a node that won't get a backward pass.
-        let inv_opac: Tensor<1> = 1.0 - opacities;
-        let noise_weight = inv_opac.powi_scalar(150.0).clamp(0.0, 1.0) * visible;
-        let noise_weight = noise_weight.unsqueeze_dim(1);
-        // `samples` is pure data — keep it on the inner device so it can
-        // multiply with the `.inner()`-stripped `noise_weight` without
-        // crossing backends.
+        trace_span!("Housekeeping").in_scope(|| {
+            // Keep bookkeeping after the optimizer so it does not interrupt
+            // fusion between gradient gathers and the updates consuming them.
+            let device = splats.device().inner();
+            let record = self
+                .refine_record
+                .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
+            // Visibility and screen size still feed pruning and oversized
+            // splitting after growth stops consuming the refinement gradient.
+            if let Some(refine_weight) = refine_weight {
+                record.gather_stats(refine_weight, visible.clone(), max_radius);
+            } else {
+                record.gather_aux_stats(visible.clone(), max_radius);
+            }
+        });
+
+        // Noise uses the forward's floored opacities, without building an autodiff graph.
         let samples = Tensor::random(
             [splats.num_splats() as usize, 3],
             Distribution::Normal(0.0, 1.0),
             &splats.device().inner(),
         );
 
-        // Could scale by train time, but, the mean_lr already decays over time.
-        let noise_weight_means = noise_weight * (lr_mean as f32 * self.config.mean_noise_weight);
-
-        // Add noise to the means portion (cols 0..3), and optionally scales
-        // (cols 7..10) and rotations (cols 3..7).
         splats.transforms = splats.transforms.map(|t| {
-            // Only allow noised gaussians to travel at most the entire extent of the current bounds.
-            let noise_m = (samples * noise_weight_means).clamp(-median_scale, median_scale);
             let inner = t.inner();
-            // slice + slice_assign with a clone of inner avoids holding two
-            // refs across slice_assign — `inner` is consumed by slice_assign
-            // and the resulting buffer is the only writer.
-            let noised_means = inner.clone().slice(s![.., 0..3]) + noise_m;
+            // Resolve random generation and views before the arithmetic so the
+            // gate through means addition can fuse as one rank-2 expression.
+            let means = inner.clone().slice(s![.., 0..3]);
+            let opacities = opacities.unsqueeze_dim::<2>(1);
+            let visible = visible.unsqueeze_dim::<2>(1);
+            let inv_opac: Tensor<2> = 1.0 - opacities;
+            let noise_weight = inv_opac.powi_scalar(150.0).clamp(0.0, 1.0) * visible;
+            let noise_weight_means =
+                noise_weight * (lr_mean as f32 * self.config.mean_noise_weight);
+            let noise_m = (samples * noise_weight_means).clamp(-median_scale, median_scale);
+            let noised_means = means + noise_m;
             let out = inner.slice_assign(s![.., 0..3], noised_means);
             Tensor::from_inner(out).require_grad()
         });
@@ -730,10 +777,6 @@ impl SplatTrainer {
         // final; baking here would accumulate the filter at every refinement
         // and leave Adam moments inconsistent with the rewritten parameters.
         let device = splats.device();
-        let client = match device.as_dispatch() {
-            burn::backend::DispatchDevice::Cube(d) => Some(d.client()),
-            burn::backend::DispatchDevice::Autodiff(_) => None,
-        };
 
         let refiner = self
             .refine_record
@@ -941,9 +984,7 @@ impl SplatTrainer {
 
         // Update current bounds based on the splats.
         self.bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
-        if let Some(client) = &client {
-            client.memory_cleanup();
-        }
+        device.memory_cleanup();
 
         // Recompute the per-splat 3D-filter floor against the new positions/
         // count and attach it. Refine must always leave the floor attached:

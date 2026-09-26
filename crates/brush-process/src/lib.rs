@@ -203,19 +203,20 @@ fn registered_host(
 
 /// Free cached GPU memory on the runtime that owns this device.
 pub fn device_memory_cleanup(device: &ProcessDevice) {
-    use burn::backend::DispatchDevice;
-    if let DispatchDevice::Cube(d) = device.as_dispatch() {
-        d.client().memory_cleanup();
-    }
+    device.memory_cleanup();
 }
 
 /// Bytes currently reserved by the runtime's memory pool, if it reports them.
+/// Retains the `CubeCL` return type for callers of this compatibility helper.
 pub fn device_memory_usage(device: &ProcessDevice) -> Option<burn::cubecl::MemoryUsage> {
-    use burn::backend::DispatchDevice;
-    match device.as_dispatch() {
-        DispatchDevice::Cube(d) => Some(d.client().memory_usage()),
-        DispatchDevice::Autodiff(_) => None,
-    }
+    device
+        .memory_pool_usage()
+        .map(|usage| burn::cubecl::MemoryUsage {
+            number_allocs: usage.number_allocs,
+            bytes_in_use: usage.bytes_in_use,
+            bytes_padding: usage.bytes_padding,
+            bytes_reserved: usage.bytes_reserved,
+        })
 }
 
 static DEVICE: OnceCell<RegisteredDevice> = OnceCell::const_new();
@@ -419,7 +420,7 @@ async fn run_process<
 
                 // As loading concatenates splats each time, memory usage tends to accumulate a lot
                 // over time. Clear out memory after each step to prevent this buildup.
-                device_memory_cleanup(device);
+                device.memory_cleanup();
 
                 // For the first frame of a new file, clear existing frames
                 if frame == 0 {

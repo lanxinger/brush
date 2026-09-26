@@ -403,7 +403,7 @@ struct GaussianBackwardState<B: Backend> {
 #[derive(Debug)]
 struct RenderBackwards;
 
-const NUM_BWD_ARGS: usize = 5;
+const NUM_BWD_ARGS: usize = 6;
 
 // Implement gradient registration when rendering backwards.
 impl<B: Backend + InternalSplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
@@ -428,6 +428,7 @@ impl<B: Backend + InternalSplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackw
             coeffs_parent,
             raw_opacity_parent,
             deferred_sh_parent,
+            coeffs_grad_sq_parent,
         ] = ops.parents;
         let compute_refine_weight = refine_weight.is_some();
 
@@ -486,6 +487,8 @@ impl<B: Backend + InternalSplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackw
                 rasterize_grads.v_combined,
             );
 
+            let compact_coeffs = splat_grads.v_coeffs.clone();
+
             if let Some(node) = transforms_parent {
                 grads.register::<B>(node.id, dense(splat_grads.v_transforms));
             }
@@ -497,6 +500,19 @@ impl<B: Backend + InternalSplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackw
             }
             if let Some(node) = raw_opacity_parent {
                 grads.register::<B>(node.id, dense(splat_grads.v_raw_opac));
+            }
+
+            // Reduce before the lazy gather: squaring the dense SH gradient
+            // would write a full [N, coeffs, 3] temporary for a single read.
+            // Row zero remains zero, so culled splats have a zero statistic.
+            if let Some(node) = coeffs_grad_sq_parent {
+                let trailing = (sh_coeffs_for_degree(state.project_uniforms.sh_degree) * 3) as f64;
+                let sq = B::float_mul(compact_coeffs.clone(), compact_coeffs);
+                let sq = B::float_sum_dims(sq, &[1, 2]);
+                // Normalize after gathering the small [N, 1, 1] statistic so
+                // division shares the gather's shape and can fuse with it.
+                let mean = B::float_div_scalar(dense(sq), burn::tensor::Scalar::Float(trailing));
+                grads.register::<B>(node.id, mean);
             }
         }
     }
@@ -559,6 +575,10 @@ pub struct TrainingSplatOutputDiff {
     pub visible: Tensor<1>,
     pub max_radius: Tensor<1>,
     pub refine_weight_holder: Tensor<1>,
+    /// Per-splat mean square of the SH gradient, shaped [N, 1, 1].
+    /// This is valid for one render/backward only; adding these statistics
+    /// across renders does not give the square of accumulated gradients.
+    pub coeffs_grad_sq_holder: Tensor<3>,
     pub deferred_sh_grad: Option<DeferredShGradHandle>,
 }
 
@@ -632,6 +652,7 @@ pub async fn render_splats_with_refine_weight(
         Rasterizer::Legacy,
         compute_refine_weight,
         false,
+        false,
     )
     .await
     .into_public()
@@ -642,6 +663,8 @@ pub async fn render_splats_with_refine_weight(
 /// populate `splats.sh_coeffs.grad()`; the caller must extract and consume
 /// `deferred_sh_grad` with that optimizer. Unsupported builds ignore the
 /// request and preserve the dense coefficient gradient.
+/// `compute_coeffs_grad_sq` requests the reduced second-moment statistic for
+/// portable Adam. Deferred SH optimizers compute it themselves and skip it.
 #[doc(hidden)]
 pub async fn render_splats_for_training(
     splats: Splats,
@@ -650,6 +673,7 @@ pub async fn render_splats_for_training(
     background: Vec3,
     compute_refine_weight: bool,
     defer_sh_grad: bool,
+    compute_coeffs_grad_sq: bool,
 ) -> TrainingSplatOutputDiff {
     let defer_sh_grad = defer_sh_grad
         && cfg!(all(
@@ -667,6 +691,7 @@ pub async fn render_splats_for_training(
         training_rasterizer(),
         compute_refine_weight,
         defer_sh_grad,
+        compute_coeffs_grad_sq && !defer_sh_grad,
     )
     .await
 }
@@ -705,7 +730,7 @@ pub async fn render_splats_with_pass_and_rasterizer(
     rasterizer: Rasterizer,
 ) -> SplatOutputDiff {
     render_splats_with_pass_and_refine_weight(
-        splats, camera, img_size, background, pass, rasterizer, true, false,
+        splats, camera, img_size, background, pass, rasterizer, true, false, false,
     )
     .await
     .into_public()
@@ -720,6 +745,7 @@ async fn render_splats_with_pass_and_refine_weight(
     rasterizer: Rasterizer,
     compute_refine_weight: bool,
     defer_sh_grad: bool,
+    compute_coeffs_grad_sq: bool,
 ) -> TrainingSplatOutputDiff {
     splats.clone().validate_values().await;
 
@@ -741,6 +767,12 @@ async fn render_splats_with_pass_and_refine_weight(
     } else {
         deferred_sh_holder
     };
+    let coeffs_grad_sq_holder = Tensor::<3>::zeros([1, 1, 1], &device);
+    let coeffs_grad_sq_holder = if compute_coeffs_grad_sq {
+        coeffs_grad_sq_holder.require_grad()
+    } else {
+        coeffs_grad_sq_holder
+    };
 
     // The 3D-filter floor is applied inside the projection kernels. It lives
     // on the inner backend and carries no gradient, so lifting it onto the
@@ -752,6 +784,7 @@ async fn render_splats_with_pass_and_refine_weight(
     let raw_opac_ad = unwrap_ad_wgpu_float(splats.raw_opacities.val());
     let refine_weight_ad = unwrap_ad_wgpu_float(refine_weight_holder.clone());
     let deferred_sh_ad = unwrap_ad_wgpu_float(deferred_sh_holder.clone());
+    let coeffs_grad_sq_ad = unwrap_ad_wgpu_float(coeffs_grad_sq_holder.clone());
 
     let prep_nodes = RenderBackwards
         .prepare::<NoCheckpointing>([
@@ -760,6 +793,7 @@ async fn render_splats_with_pass_and_refine_weight(
             sh_coeffs_ad.node(),
             raw_opac_ad.node(),
             deferred_sh_ad.node(),
+            coeffs_grad_sq_ad.node(),
         ])
         .compute_bound()
         .stateful();
@@ -843,6 +877,7 @@ async fn render_splats_with_pass_and_refine_weight(
         max_radius: wrap_wgpu_float(max_radius_inner),
         opacities: wrap_wgpu_float(opacities_inner),
         refine_weight_holder,
+        coeffs_grad_sq_holder,
         deferred_sh_grad,
     }
 }
@@ -938,11 +973,10 @@ impl<B: Backend + SplatOps + InternalSplatBwdOps, C: CheckpointStrategy> SplatOp
         background: Vec3,
         pass: crate::gaussian_splats::RasterPass,
     ) -> crate::RenderOutput<Self> {
-        // Keep the fork's five-parent backward operation uniform. This
-        // untracked tensor occupies the deferred-SH slot for the canonical
-        // backend-extension path, so normal renders still materialize the
-        // dense coefficient gradient.
+        // The internal training-only holders remain untracked on the public
+        // backend-extension path, preserving ordinary gradient behavior.
         let deferred_sh = <Self as AutodiffBackend>::from_inner(sh_coeffs.primitive().clone());
+        let coeffs_grad_sq = <Self as AutodiffBackend>::from_inner(sh_coeffs.primitive().clone());
         let prep_nodes = RenderBackwards
             .prepare::<NoCheckpointing>([
                 transforms.node(),
@@ -950,6 +984,7 @@ impl<B: Backend + SplatOps + InternalSplatBwdOps, C: CheckpointStrategy> SplatOp
                 sh_coeffs.node(),
                 raw_opacities.node(),
                 deferred_sh.node(),
+                coeffs_grad_sq.node(),
             ])
             .compute_bound()
             .stateful();
