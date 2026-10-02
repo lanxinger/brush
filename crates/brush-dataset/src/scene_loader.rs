@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use brush_async::Actor;
 use burn::tensor::TensorData;
@@ -58,8 +58,22 @@ impl BatchCache {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SceneLoaderError {
+    #[error("Scene loader failed to load {path}: {source}")]
+    Image {
+        path: PathBuf,
+        #[source]
+        source: image::ImageError,
+    },
+    #[error("Need at least one view in dataset")]
+    EmptyScene,
+    #[error("Scene loader channel closed unexpectedly")]
+    Closed,
+}
+
 pub struct SceneLoader {
-    rx: mpsc::Receiver<SceneBatch>,
+    rx: mpsc::Receiver<Result<SceneBatch, SceneLoaderError>>,
     // Owns the loader actor threads. Dropping cancels them; their
     // senders then drop, the channel closes, and `next_batch` returns.
     _actors: Vec<Actor>,
@@ -105,11 +119,11 @@ impl SceneLoader {
         }
     }
 
-    pub async fn next_batch(&mut self) -> SceneBatch {
+    pub async fn next_batch(&mut self) -> Result<SceneBatch, SceneLoaderError> {
         self.rx
             .recv()
             .await
-            .expect("Scene loader channel closed unexpectedly")
+            .unwrap_or_else(|| Err(SceneLoaderError::Closed))
     }
 }
 
@@ -125,7 +139,7 @@ async fn run_loader(
     views: Arc<Vec<crate::scene::SceneView>>,
     cache: Arc<Mutex<BatchCache>>,
     load_locks: Arc<Vec<Mutex<()>>>,
-    tx: mpsc::Sender<SceneBatch>,
+    tx: mpsc::Sender<Result<SceneBatch, SceneLoaderError>>,
     seed: u64,
 ) {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
@@ -140,7 +154,10 @@ async fn run_loader(
             shuffled = (0..views.len()).collect();
             shuffled.shuffle(&mut rng);
         }
-        let index = shuffled.pop().expect("Need at least one view in dataset");
+        let Some(index) = shuffled.pop() else {
+            permit.send(Err(SceneLoaderError::EmptyScene));
+            return;
+        };
         let view = &views[index];
 
         let cached = cache.lock().await.get(index);
@@ -158,11 +175,16 @@ async fn run_loader(
                 // Cached TensorData owns shared bytes, so the clone is shallow.
                 batch.as_ref().clone()
             } else {
-                let raw = view
-                    .image
-                    .load()
-                    .await
-                    .expect("Scene loader failed to load an image");
+                let raw = match view.image.load().await {
+                    Ok(raw) => raw,
+                    Err(source) => {
+                        permit.send(Err(SceneLoaderError::Image {
+                            path: view.image.path().to_owned(),
+                            source,
+                        }));
+                        return;
+                    }
+                };
                 let (img_packed, has_alpha) = view_to_packed_data(raw, view.image.alpha_mode());
                 let mut batch = SceneBatch {
                     img_packed,
@@ -183,7 +205,7 @@ async fn run_loader(
             }
         };
 
-        permit.send(batch);
+        permit.send(Ok(batch));
         brush_async::yield_now().await;
     }
 }
@@ -211,5 +233,101 @@ mod tests {
             loader_actor_count(128, false) <= PREFETCH_BATCHES,
             "loader actors exceeded prefetch capacity"
         );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn config() -> LoadDatasetConfig {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            dataset: LoadDatasetConfig,
+        }
+        TestCli::parse_from(["test"]).dataset
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn truncated_image_returns_decoder_error() {
+        use crate::scene::{LoadImage, SceneView};
+        use brush_render::camera::Camera;
+        use brush_vfs::BrushVfs;
+        use image::{Rgb, RgbImage};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("truncated.png");
+        RgbImage::from_pixel(4, 2, Rgb([10, 20, 30]))
+            .save(&path)
+            .expect("save image");
+        let mut bytes = std::fs::read(&path).expect("read image");
+        let data_start = bytes.windows(4).position(|chunk| chunk == b"IDAT").unwrap() + 4;
+        bytes.truncate(data_start);
+        std::fs::write(&path, bytes).expect("truncate pixel data");
+        let vfs = Arc::new(BrushVfs::from_path(dir.path()).await.expect("vfs"));
+        let image = LoadImage::new(vfs, "truncated.png".into(), None, 1920, None, false);
+        assert_eq!(
+            image.output_dimensions().await.expect("valid header"),
+            (4, 2)
+        );
+        let scene = Scene::new(vec![SceneView {
+            image,
+            camera: Camera::default(),
+        }]);
+        let mut loader = SceneLoader::new(&scene, 0, &config());
+        let result = loader.next_batch().await;
+        assert!(
+            matches!(result, Err(SceneLoaderError::Image { path, .. }) if path == std::path::Path::new("truncated.png"))
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn empty_scene_and_closed_channel_return_errors() {
+        let mut loader = SceneLoader::new(&Scene::new(vec![]), 0, &config());
+        assert!(matches!(
+            loader.next_batch().await,
+            Err(SceneLoaderError::EmptyScene)
+        ));
+
+        let (tx, rx) = mpsc::channel(1);
+        drop(tx);
+        let mut loader = SceneLoader {
+            rx,
+            _actors: vec![],
+        };
+        assert!(matches!(
+            loader.next_batch().await,
+            Err(SceneLoaderError::Closed)
+        ));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn valid_image_batches_still_load_and_hit_the_cache() {
+        use crate::scene::{LoadImage, SceneView};
+        use brush_render::camera::Camera;
+        use brush_vfs::BrushVfs;
+        use image::{Rgb, RgbImage};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("image.png");
+        RgbImage::from_pixel(4, 2, Rgb([10, 20, 30]))
+            .save(&path)
+            .expect("save image");
+        let vfs = Arc::new(BrushVfs::from_path(dir.path()).await.expect("vfs"));
+        let scene = Scene::new(vec![SceneView {
+            image: LoadImage::new(vfs, "image.png".into(), None, 1920, None, false),
+            camera: Camera::default(),
+        }]);
+        let mut loader = SceneLoader::new(&scene, 0, &config());
+        let first = loader.next_batch().await.expect("first batch");
+        // All producers serialize this view's first load and share its cache.
+        // Removing the input makes subsequent decoding fail if the cache is lost.
+        std::fs::remove_file(path).expect("remove cached input");
+        for _ in 0..PREFETCH_BATCHES * 2 {
+            let batch = loader.next_batch().await.expect("cached batch");
+            assert_eq!(batch.view_index, 0);
+            assert_eq!(batch.img_packed, first.img_packed);
+        }
     }
 }

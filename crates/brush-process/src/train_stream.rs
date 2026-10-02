@@ -369,7 +369,7 @@ pub(crate) async fn train_stream(
         let batch = dataloader
             .next_batch()
             .instrument(trace_span!("Wait for next data batch"))
-            .await;
+            .await?;
 
         // Lift splats onto the autodiff graph for this step, run training,
         // then strip back to inner so the viewer slot sees plain splats.
