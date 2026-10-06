@@ -82,8 +82,8 @@ pub fn create_random_splats(
             // Log-uniform depth so we don't over-pack near the camera
             let depth = (rng.random_range(ln_near..ln_far)).exp();
 
-            // Camera looks along -Z in local space
-            let local_point = Vec3::new(dx * depth, dy * depth, -depth);
+            // Brush cameras look along +Z, with Y pointing down.
+            let local_point = Vec3::new(dx * depth, dy * depth, depth);
             let world_point = local_to_world.transform_point3(local_point);
 
             [world_point.x, world_point.y, world_point.z]
@@ -245,6 +245,74 @@ pub fn to_init_splats(data: SplatData, mode: SplatRenderMode, device: &Device) -
 mod tests {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn random_splats_lie_inside_camera_frustums() {
+        use brush_render::kernels::camera_model::CameraModel;
+        use glam::{Quat, Vec2};
+
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let camera = |position, rotation| {
+            Camera::new(
+                position,
+                rotation,
+                1.0,
+                0.7,
+                Vec2::splat(0.5),
+                CameraModel::Pinhole,
+            )
+        };
+        let cameras = [
+            camera(
+                Vec3::new(1.0, -2.0, 3.0),
+                Quat::from_euler(glam::EulerRot::XYZ, 0.4, -0.8, 0.3),
+            ),
+            camera(
+                Vec3::new(-4.0, 0.5, 2.0),
+                Quat::from_euler(glam::EulerRot::XYZ, -0.6, 2.1, 0.1),
+            ),
+        ];
+        let config = RandomSplatsConfig { init_count: 300 };
+        let scene_scale = 2.0;
+        let depth_range = (scene_scale * 0.05 - 1e-4)..=(scene_scale + 1e-4);
+
+        for cameras in [&cameras[..1], &cameras[1..], &cameras[..]] {
+            let mut rng = StdRng::seed_from_u64(7);
+            let splats = create_random_splats(
+                &config,
+                cameras,
+                Some(scene_scale),
+                &mut rng,
+                SplatRenderMode::Default,
+                &device,
+            );
+            let means: Vec<f32> = splats
+                .means()
+                .into_data_async()
+                .await
+                .expect("readback")
+                .try_into_vec()
+                .expect("Wrong type");
+            assert_eq!(means.len(), config.init_count * 3);
+
+            for &mean in means.as_chunks::<3>().0 {
+                let mean = Vec3::from_array(mean);
+                let inside_frustum = cameras.iter().any(|camera| {
+                    let local = camera.world_to_local().transform_point3(mean);
+                    let tan_half_x = (camera.fov_x * 0.5).tan() as f32;
+                    let tan_half_y = (camera.fov_y * 0.5).tan() as f32;
+                    depth_range.contains(&local.z)
+                        && (local.x / local.z).abs() <= tan_half_x + 1e-3
+                        && (local.y / local.z).abs() <= tan_half_y + 1e-3
+                });
+                assert!(
+                    inside_frustum,
+                    "splat {mean:?} is outside all camera frustums"
+                );
+            }
+        }
+    }
 
     fn bounds_from_pos_sorted_reference(percentile: f32, means: &[f32]) -> BoundingBox {
         let (mut x_vals, mut y_vals, mut z_vals): (Vec<f32>, Vec<f32>, Vec<f32>) = means
