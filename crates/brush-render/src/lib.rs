@@ -91,6 +91,8 @@ pub trait SplatOps: Backend {
 #[doc(hidden)]
 #[burn::backend::backend_extension(Cube)]
 pub trait SplatRasterizerOps: SplatOps {
+    /// Scale raw axes and their Mip-Splatting floor during projection.
+    /// Training uses 1.0; viewer controls avoid materializing scaled tensors.
     #[allow(clippy::too_many_arguments)]
     fn render_with_rasterizer(
         camera: &Camera,
@@ -100,6 +102,7 @@ pub trait SplatRasterizerOps: SplatOps {
         raw_opacities: FloatTensor<Self>,
         min_scale: FloatTensor<Self>,
         has_min_scale: bool,
+        splat_scale: f32,
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: gaussian_splats::RasterPass,

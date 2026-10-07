@@ -477,19 +477,9 @@ pub async fn render_splats_with_rasterizer(
     let transforms = splats.transforms.val();
     let raw_opacities = splats.raw_opacities.val();
 
-    // Scaling both the raw axes and floor preserves the baked opacity
-    // compensation and the viewer scale control's existing behavior.
-    let min_scale = if let Some(scale) = splat_scale {
-        min_scale * scale
-    } else {
-        min_scale
-    };
-    let transforms = if let Some(scale) = splat_scale {
-        let adjusted = transforms.clone().slice(s![.., 7..10]) + scale.ln();
-        transforms.slice_assign(s![.., 7..10], adjusted)
-    } else {
-        transforms
-    };
+    // Projection scales both the raw axes and floor, preserving the baked
+    // opacity compensation without copying either tensor.
+    let splat_scale = splat_scale.unwrap_or(1.0);
 
     let render_mode = if splats.render_mip {
         SplatRenderMode::Mip
@@ -518,6 +508,7 @@ pub async fn render_splats_with_rasterizer(
         raw_opacities.into_dispatch(),
         min_scale.into_dispatch(),
         has_min_scale,
+        splat_scale,
         render_mode,
         background,
         pass,

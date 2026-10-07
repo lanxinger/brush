@@ -29,6 +29,8 @@ It also supports masking images:
 - A folder of images called 'masks'. This ignores parts of the image that are masked out.
   Black pixels in the mask are ignored, white pixels are kept. Pass `--invert-masks` if your masks are the other way around.
 
+For practical guidance on training duration, splat growth, and memory use, see the [training parameter guide](docs/training-parameters.md).
+
 ### Appearance compensation
 
 For captures with varying exposure, white balance, or lens vignetting between images, Brush can learn per-view photometric corrections during training so the variation isn't baked into the splats. The corrections only apply while training — exported splats keep canonical colors and render unmodified.

@@ -209,13 +209,20 @@ pub fn project_backwards_kernel(
         transforms[tbase + 1],
         transforms[tbase + 2],
     );
-    let scale_raw = read_scale(transforms, tbase);
+    let scale_raw = read_scale(transforms, tbase, u.log_scale_offset);
     let quat_unorm = read_quat_unorm(transforms, tbase);
     let quat = quat_unorm.normalize();
 
     // Mip-Splatting floor, matching the forward.
     let opac_sig = sigmoid(raw_opac[global_gid as usize]);
-    let floor = apply_scale_floor(scale_raw, opac_sig, min_scale, global_gid, has_min_scale);
+    let floor = apply_scale_floor(
+        scale_raw,
+        opac_sig,
+        min_scale,
+        global_gid,
+        u.splat_scale,
+        has_min_scale,
+    );
     let scale = floor.scale;
     let ratio_sq = floor.ratio_sq;
 

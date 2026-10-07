@@ -3,7 +3,7 @@ use brush_process::slot::Slot;
 use brush_render::{TextureMode, camera::Camera, gaussian_splats::Splats, render_splats};
 use egui::Rect;
 use glam::{UVec2, Vec3};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use eframe::egui_wgpu::{self, CallbackTrait, wgpu};
 
@@ -165,9 +165,9 @@ pub struct SplatBackbufferResources {
     // reallocated when the window resizes.
     upload_buffer: Option<wgpu::Buffer>,
     // `AsyncMap::latest()` clones the same `Frame` until rendering publishes a
-    // replacement. Keep its Arc identity so ordinary UI repaints do not upload
-    // the same pixels again.
-    uploaded_pixels: Option<Arc<Vec<u8>>>,
+    // replacement. Keep its weak identity so ordinary UI repaints do not upload
+    // the same pixels again or retain an obsolete frame's CPU pixels.
+    uploaded_pixels: Weak<Vec<u8>>,
 }
 
 impl SplatBackbufferResources {
@@ -254,7 +254,7 @@ impl SplatBackbufferResources {
             bind_group_layout,
             bind_group: None,
             upload_buffer: None,
-            uploaded_pixels: None,
+            uploaded_pixels: Weak::new(),
         }
     }
 
@@ -283,8 +283,8 @@ struct SplatBackbufferPainter {
     frame: Frame,
 }
 
-fn needs_upload(uploaded: Option<&Arc<Vec<u8>>>, current: &Arc<Vec<u8>>) -> bool {
-    uploaded.is_none_or(|pixels| !Arc::ptr_eq(pixels, current))
+fn needs_upload(uploaded: &Weak<Vec<u8>>, current: &Arc<Vec<u8>>) -> bool {
+    !uploaded.ptr_eq(&Arc::downgrade(current))
 }
 
 impl CallbackTrait for SplatBackbufferPainter {
@@ -300,7 +300,7 @@ impl CallbackTrait for SplatBackbufferPainter {
             return Vec::new();
         };
 
-        let frame_changed = needs_upload(res.uploaded_pixels.as_ref(), &self.frame.pixels);
+        let frame_changed = needs_upload(&res.uploaded_pixels, &self.frame.pixels);
         if !frame_changed {
             return Vec::new();
         }
@@ -336,7 +336,7 @@ impl CallbackTrait for SplatBackbufferPainter {
             }));
         }
 
-        res.uploaded_pixels = Some(self.frame.pixels.clone());
+        res.uploaded_pixels = Arc::downgrade(&self.frame.pixels);
         Vec::new()
     }
 
@@ -363,15 +363,29 @@ impl CallbackTrait for SplatBackbufferPainter {
 #[cfg(test)]
 mod tests {
     use super::needs_upload;
-    use std::sync::Arc;
+    use std::sync::{Arc, Weak};
 
     #[test]
     fn uploads_only_newly_published_frames() {
         let frame = Arc::new(vec![1, 2, 3, 4]);
-        assert!(needs_upload(None, &frame));
-        assert!(!needs_upload(Some(&frame), &frame.clone()));
+        assert!(needs_upload(&Weak::new(), &frame));
+        let uploaded = Arc::downgrade(&frame);
+        assert!(!needs_upload(&uploaded, &frame));
 
         let equal_pixels_from_new_render = Arc::new(vec![1, 2, 3, 4]);
-        assert!(needs_upload(Some(&frame), &equal_pixels_from_new_render));
+        assert!(needs_upload(&uploaded, &equal_pixels_from_new_render));
+    }
+
+    #[test]
+    fn uploaded_identity_does_not_retain_obsolete_pixels() {
+        let frame = Arc::new(vec![1, 2, 3, 4]);
+        let uploaded = Arc::downgrade(&frame);
+        assert_eq!(Arc::strong_count(&frame), 1);
+
+        drop(frame);
+        assert!(uploaded.upgrade().is_none());
+
+        let replacement = Arc::new(vec![1, 2, 3, 4]);
+        assert!(needs_upload(&uploaded, &replacement));
     }
 }

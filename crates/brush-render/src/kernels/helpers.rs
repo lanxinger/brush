@@ -347,11 +347,11 @@ pub fn read_mean_viewspace(transforms: &Tensor<f32>, base: usize, u: ProjectUnif
 }
 
 #[cube]
-pub fn read_scale(transforms: &Tensor<f32>, base: usize) -> Vec3A {
+pub fn read_scale(transforms: &Tensor<f32>, base: usize, log_scale_offset: f32) -> Vec3A {
     Vec3A::new(
-        f32::exp(transforms[base + 7]),
-        f32::exp(transforms[base + 8]),
-        f32::exp(transforms[base + 9]),
+        f32::exp(transforms[base + 7] + log_scale_offset),
+        f32::exp(transforms[base + 8] + log_scale_offset),
+        f32::exp(transforms[base + 9] + log_scale_offset),
     )
 }
 
@@ -378,13 +378,15 @@ pub struct ScaleFloor {
 
 /// Apply the floor `min_scale[gid]` to a splat's scale and sigmoid opacity,
 /// matching `fold_min_scale` on the host. With `has_min_scale` false this is
-/// the identity and `min_scale` is never read.
+/// the identity and `min_scale` is never read. The viewer scales the floor
+/// along with the raw axes, preserving its opacity compensation.
 #[cube]
 pub fn apply_scale_floor(
     scale: Vec3A,
     opac_sig: f32,
     min_scale: &Tensor<f32>,
     gid: u32,
+    splat_scale: f32,
     #[comptime] has_min_scale: bool,
 ) -> ScaleFloor {
     let mut floored = scale;
@@ -393,7 +395,7 @@ pub fn apply_scale_floor(
     let mut ratio_sq = Vec3A::new(1.0f32, 1.0f32, 1.0f32);
     let mut opac_open = true;
     if has_min_scale {
-        let f = min_scale[gid as usize];
+        let f = min_scale[gid as usize] * splat_scale;
         let f2 = f * f;
         floored = Vec3A::new(
             f32::sqrt(scale.x() * scale.x() + f2),

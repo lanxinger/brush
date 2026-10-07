@@ -78,6 +78,8 @@ pub struct ProjectUniforms {
     pub sh_degree: u32,
     pub total_splats: u32,
     pub num_visible: u32,
+    pub log_scale_offset: f32,
+    pub splat_scale: f32,
 }
 
 #[cube]

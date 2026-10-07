@@ -821,6 +821,7 @@ async fn render_splats_with_pass_and_refine_weight(
         raw_opac_inner.clone(),
         min_scale_inner.clone(),
         has_min_scale,
+        1.0,
         render_mode,
         background,
         pass,

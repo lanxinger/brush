@@ -16,6 +16,7 @@ use burn::tensor::{Distribution, Tensor};
 use glam::Vec3;
 use wasm_bindgen_test::wasm_bindgen_test;
 
+mod projection;
 mod raster_oracle;
 
 #[cfg(target_family = "wasm")]
@@ -657,6 +658,7 @@ async fn render_empty_primitives(
         raw_opacities,
         empty(),
         false,
+        1.0,
         SplatRenderMode::Default,
         background,
         pass,
@@ -687,6 +689,7 @@ async fn zero_splats_renders_background() {
     );
     assert_eq!(output.aux.num_visible, 0);
     assert_eq!(output.aux.num_intersections, 0);
+    assert_eq!(output.compact_from_global.shape().dims::<1>(), [0]);
     assert_eq!(output.aux.visible.shape().dims::<1>(), [0]);
     assert_eq!(output.aux.max_radius.shape().dims::<1>(), [0]);
     assert_eq!(output.aux.tile_offsets.shape().dims::<3>(), [2, 2, 2]);
@@ -733,6 +736,7 @@ async fn zero_splats_renders_packed_background() {
     );
     assert_eq!(output.aux.num_visible, 0);
     assert_eq!(output.aux.num_intersections, 0);
+    assert_eq!(output.compact_from_global.shape().dims::<1>(), [0]);
     // Packed mode retains the established one-element dummy visible buffer.
     assert_eq!(output.aux.visible.shape().dims::<1>(), [1]);
     assert_eq!(output.aux.max_radius.shape().dims::<1>(), [0]);

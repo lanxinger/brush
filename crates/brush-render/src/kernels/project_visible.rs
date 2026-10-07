@@ -31,6 +31,7 @@ pub fn project_visible_kernel(
     u: ProjectUniforms,
     #[comptime] mip_splatting: bool,
     #[comptime] has_min_scale: bool,
+    #[comptime] bwd_info: bool,
     #[comptime] sh_degree: u32,
     #[comptime] camera_model: CameraModel,
 ) {
@@ -43,17 +44,26 @@ pub fn project_visible_kernel(
     // Inverse map so the backward's compact gradients can be gathered per
     // global splat. Offset by one: row 0 of those buffers is the zero row
     // that culled splats point at.
-    compact_from_global[global_gid as usize] = compact_gid + 1u32;
+    if bwd_info {
+        compact_from_global[global_gid as usize] = compact_gid + 1u32;
+    }
 
     // means(3) + quats(4) + log_scales(3)
     let base = (global_gid * 10u32) as usize;
     let mean = Vec3A::new(transforms[base], transforms[base + 1], transforms[base + 2]);
-    let scale = read_scale(transforms, base);
+    let scale = read_scale(transforms, base, u.log_scale_offset);
     let quat_unorm = read_quat_unorm(transforms, base);
     let quat = quat_unorm.normalize();
 
     let opac_sig = sigmoid(raw_opacities[global_gid as usize]);
-    let floor = apply_scale_floor(scale, opac_sig, min_scale, global_gid, has_min_scale);
+    let floor = apply_scale_floor(
+        scale,
+        opac_sig,
+        min_scale,
+        global_gid,
+        u.splat_scale,
+        has_min_scale,
+    );
 
     let mean_c = world_to_cam(mean, u);
     let raw_cov = calc_cov2d(floor.scale, quat, mean_c, u, camera_model);
