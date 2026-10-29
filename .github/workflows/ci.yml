@@ -49,6 +49,10 @@ jobs:
       - name: check --no-default-features
         run: cargo check --locked --workspace --no-default-features --all-targets
 
+      # Workspace feature unification can re-enable Rerun through other packages.
+      - name: check embedded build without Rerun
+        run: cargo check --locked -p brush-c --no-default-features --all-targets
+
       # `--document-private-items` is a superset of the public-docs run.
       - name: cargo doc
         run: cargo doc --workspace --document-private-items --no-deps --all-features

@@ -14,6 +14,11 @@ RUSTC="$(rustup which --toolchain stable rustc)" \
   --locked --release -p brush-c --target aarch64-apple-ios
 ```
 
+Rerun logging is enabled by default. To exclude the Rerun SDK and its
+dependencies from an embedded build, add `--no-default-features` to the build
+command. Rerun logging is a no-op in that configuration. To also enable the
+native Metal path, add `--features native-msl`.
+
 The host app needs:
 
 - `target/aarch64-apple-ios/release/libbrush_c.a`

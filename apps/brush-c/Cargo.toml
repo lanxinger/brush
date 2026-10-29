@@ -10,10 +10,12 @@ name = "brush_c"
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [features]
+default = ["rerun"]
+rerun = ["brush-process/rerun"]
 native-msl = ["brush-process/native-msl"]
 
 [dependencies]
-brush-process.path = "../../crates/brush-process"
+brush-process = { path = "../../crates/brush-process", default-features = false }
 brush-render.path = "../../crates/brush-render"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
