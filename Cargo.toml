@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/mcap"]
 members = [
     "apps/brush-app",
     "apps/brush-c",
@@ -328,6 +329,9 @@ single_range_in_vec_init = "allow"
 
 # WebGPU subgroup support, JS handle interop, and error-scope fixes on wgpu 30.0.1.
 [patch.crates-io]
+# Rerun 0.36 requires mcap 0.25, which pins vulnerable zstd 0.13.
+# Remove this patch once Rerun upgrades to an MCAP release using zstd 0.14.
+mcap                 = { path = "vendor/mcap" }
 wgpu                 = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
 wgpu-core            = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
 wgpu-hal             = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
