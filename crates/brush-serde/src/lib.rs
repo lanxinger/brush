@@ -6,7 +6,7 @@ pub mod ply_gaussian;
 pub mod quant;
 
 // Re-export main functionality
-pub use export::{ExportError, splat_to_ply};
+pub use export::{ExportError, splat_to_ply, splat_to_ply_writer};
 pub use import::{
     ParseMetadata, SplatData, SplatMessage, load_splat_from_ply, stream_splat_from_ply,
 };

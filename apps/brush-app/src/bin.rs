@@ -48,13 +48,13 @@ fn main() -> Result<(), anyhow::Error> {
             if args.with_viewer {
                 use crate::ui::app::App;
 
-                brush_process::burn_init_setup().await;
-
                 let logger = env_logger::Builder::from_default_env()
                     .target(env_logger::Target::Stdout)
                     .build();
                 let max = logger.filter();
                 crate::ui::log_panel::install_global_logger(Box::new(logger), max);
+
+                brush_process::burn_init_setup().await;
 
                 let icon = eframe::icon_data::from_png_bytes(
                     &include_bytes!("../assets/icon-256.png")[..],

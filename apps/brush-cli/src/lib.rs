@@ -154,52 +154,64 @@ pub async fn run_headless(
     process: RunningProcess,
     train_stream_config: TrainStreamConfig,
 ) -> Result<(), anyhow::Error> {
+    let progress = init_cli_logging()?;
     // Open the device up front so it overlaps with mounting the dataset,
     // rather than on the first kernel.
     brush_process::burn_init_setup().await;
-    run_cli_ui(process, train_stream_config).await
+    run_cli_ui_with_progress(process, train_stream_config, progress).await
+}
+
+/// Install the CLI logger once, before GPU initialization, using `RUST_LOG`.
+pub fn init_cli_logging() -> Result<MultiProgress, anyhow::Error> {
+    static LOGGING: std::sync::OnceLock<Result<MultiProgress, String>> = std::sync::OnceLock::new();
+    LOGGING
+        .get_or_init(|| {
+            let logger = env_logger::Builder::from_default_env()
+                .target(env_logger::Target::Stdout)
+                .build();
+            let level = logger.filter();
+            let multi = MultiProgress::new();
+            LogWrapper::new(multi.clone(), logger)
+                .try_init()
+                .map_err(|error| format!("Failed to initialize CLI logger: {error}"))?;
+            log::set_max_level(level);
+            Ok(multi)
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// Run the CLI: pin the trainer stream to a dedicated [`Actor`] thread,
 /// drive the indicatif UI on the main task.
 pub async fn run_cli_ui(
+    process: RunningProcess,
+    train_stream_config: TrainStreamConfig,
+) -> Result<(), anyhow::Error> {
+    run_cli_ui_with_progress(process, train_stream_config, init_cli_logging()?).await
+}
+
+async fn run_cli_ui_with_progress(
     mut process: RunningProcess,
     mut train_stream_config: TrainStreamConfig,
+    sp: MultiProgress,
 ) -> Result<(), anyhow::Error> {
     // Pump the trainer stream from a dedicated Actor thread; the
     // indicatif UI loop below consumes its output on the main task.
     let (tx, mut messages) = mpsc::unbounded_channel();
     let trainer = Actor::new("cli-trainer");
-    trainer
-        .run(move || async move {
-            while let Some(msg) = process.stream.next().await {
-                if tx.send(msg).is_err() {
-                    break;
-                }
+    let trainer_task = trainer.run(move || async move {
+        while let Some(msg) = process.stream.next().await {
+            let failed = msg.is_err();
+            if tx.send(msg).is_err() || failed {
+                break;
             }
-        })
-        .detach();
+        }
+    });
 
     // Hold the actor for the lifetime of the UI loop; dropping it
     // would kill the pump.
     let _trainer = trainer;
-
-    // Initialize the logger with indicatif integration to prevent
-    // progress bars from clobbering log output.
-    let sp = {
-        let mut builder = env_logger::builder();
-        builder.target(env_logger::Target::Stdout);
-        let logger = builder.build();
-        let level = logger.filter();
-        let multi = MultiProgress::new();
-
-        LogWrapper::new(multi.clone(), logger)
-            .try_init()
-            .expect("Failed to initialize logger");
-        log::set_max_level(level);
-
-        multi
-    };
 
     log::info!("Compute backend: {:?}", process.device);
 
@@ -275,6 +287,8 @@ pub async fn run_cli_ui(
 
     #[allow(unused_mut)]
     let mut duration = Duration::from_secs(0);
+    let mut done_training = false;
+    let mut stream_error = None;
 
     while let Some(msg) = messages.recv().await {
         let _span = trace_span!("CLI UI").entered();
@@ -284,7 +298,8 @@ pub async fn run_cli_ui(
             Err(error) => {
                 // Don't print the error here. It'll bubble up and be printed as output.
                 let _ = sp.println("❌ Encountered an error");
-                return Err(error);
+                stream_error = Some(error);
+                break;
             }
         };
 
@@ -296,7 +311,9 @@ pub async fn run_cli_ui(
                 if !training {
                     // Display a big warning saying viewing splats from the CLI doesn't make sense.
                     let _ = sp.println("❌ Only training is supported in the CLI (try passing --with-viewer to view a splat)");
-                    break;
+                    anyhow::bail!(
+                        "Only training is supported in the CLI (use --with-viewer to view a splat)"
+                    );
                 }
                 main_spinner.set_message(format!("Loading {name}..."));
             }
@@ -370,7 +387,7 @@ pub async fn run_cli_ui(
                         "Eval iter {iter}: PSNR {avg_psnr:.2}, SSIM {avg_ssim:.3}{masked}"
                     ));
                 }
-                TrainMessage::DoneTraining => {}
+                TrainMessage::DoneTraining => done_training = true,
             },
             ProcessMessage::DoneLoading => {
                 log::info!("Completed loading.");
@@ -386,6 +403,14 @@ pub async fn run_cli_ui(
             _ => {}
         }
     }
+
+    // A closed channel can also mean the worker panicked. Await it even after
+    // DoneTraining so failures during shutdown cannot look like success.
+    trainer_task.await;
+    if let Some(error) = stream_error {
+        return Err(error);
+    }
+    anyhow::ensure!(done_training, "Training stream closed before DoneTraining");
 
     let duration_secs = Duration::from_secs(duration.as_secs());
     let _ = sp.println(format!(
@@ -404,6 +429,78 @@ pub async fn run_cli_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_test_stream(
+        stream: impl brush_process::ProcessStream + 'static,
+    ) -> Result<(), anyhow::Error> {
+        let process = RunningProcess {
+            stream: Box::pin(stream),
+            splat_view: Default::default(),
+            device: brush_process::default_device(),
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run_cli_ui_with_progress(
+                process,
+                TrainStreamConfig::default(),
+                MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden()),
+            ))
+    }
+
+    #[test]
+    fn training_requires_completion_message() {
+        let error = run_test_stream(tokio_stream::empty()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Training stream closed before DoneTraining"
+        );
+        run_test_stream(tokio_stream::iter([Ok(ProcessMessage::TrainMessage(
+            TrainMessage::DoneTraining,
+        ))]))
+        .unwrap();
+    }
+
+    #[test]
+    fn training_preserves_stream_error_context_and_stops_polling() {
+        let error = anyhow::anyhow!("original I/O failure").context("training stage");
+        let stream = tokio_stream::iter([Err(error)]).chain(tokio_stream::iter([()]).map(|()| {
+            panic!("must not poll a failed stream again");
+        }));
+        let error = run_test_stream(stream).unwrap_err();
+        assert_eq!(format!("{error:#}"), "training stage: original I/O failure");
+    }
+
+    #[test]
+    #[should_panic(expected = "original GPU worker failure")]
+    fn training_propagates_worker_panic() {
+        run_test_stream(tokio_stream::iter([()]).map(|()| {
+            panic!("original GPU worker failure");
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "GPU shutdown failure")]
+    fn training_propagates_panic_after_completion() {
+        let completed =
+            tokio_stream::iter([Ok(ProcessMessage::TrainMessage(TrainMessage::DoneTraining))]);
+        run_test_stream(completed.chain(tokio_stream::iter([()]).map(|()| {
+            panic!("GPU shutdown failure");
+        })))
+        .unwrap();
+    }
+
+    #[test]
+    fn training_propagates_error_after_completion() {
+        let error = run_test_stream(tokio_stream::iter([
+            Ok(ProcessMessage::TrainMessage(TrainMessage::DoneTraining)),
+            Err(anyhow::anyhow!("shutdown failed")),
+        ]))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "shutdown failed");
+    }
 
     #[test]
     fn tracks_explicit_default_valued_training_option() {

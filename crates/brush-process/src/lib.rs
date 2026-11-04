@@ -24,7 +24,7 @@ pub const VERSION: &str = env!("BRUSH_VERSION");
 
 #[cfg(not(target_os = "ios"))]
 use burn_wgpu::graphics::AutoGraphicsApi;
-use burn_wgpu::{RuntimeOptions, WgpuDevice, graphics::GraphicsApi};
+use burn_wgpu::{RuntimeOptions, WgpuDevice};
 use wgpu::{Adapter, Device, Queue};
 
 use std::future::Future;
@@ -57,7 +57,16 @@ fn burn_options() -> RuntimeOptions {
 /// contends with GUI work on the same queue. wgpu needs an explicit setup so
 /// the adapter and limits are chosen before any kernel runs.
 async fn open_device() -> RegisteredDevice {
-    burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::default(), burn_options()).await;
+    let started = web_time::Instant::now();
+    log::info!("GPU initialization started");
+    let setup =
+        burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::default(), burn_options())
+            .await;
+    log::info!(
+        "GPU initialized in {:.3}s: {:?}",
+        started.elapsed().as_secs_f64(),
+        setup.adapter.get_info(),
+    );
     RegisteredDevice {
         burn: WgpuDevice::default().into(),
         host: None,
@@ -110,13 +119,14 @@ pub fn try_burn_init_device(
     }
 
     let host_device = device.clone();
+    let backend = adapter.get_info().backend;
 
     let setup = burn_wgpu::WgpuSetup {
         instance: wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()), // unused... need to fix this in Burn.
         adapter,
         device,
         queue,
-        backend: DefaultGraphicsApi::backend(),
+        backend,
     };
     let burn: ProcessDevice = burn_wgpu::init_device(setup, burn_options()).into();
     let registered = RegisteredDevice {
