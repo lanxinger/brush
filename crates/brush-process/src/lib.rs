@@ -10,10 +10,52 @@ mod training_metrics;
 pub use brush_vfs::DataSource;
 pub type ProcessDevice = burn::tensor::Device;
 
+/// The registered compute device, or the one [`burn_init_setup`] would open.
 pub fn default_device() -> ProcessDevice {
     try_device()
         .cloned()
-        .unwrap_or_else(|| WgpuDevice::default().into())
+        .unwrap_or_else(unregistered_default_device)
+}
+
+/// Training runs on wgpu by default. Set to `auto` (or `metal`) to let `CubeCL`
+/// pick instead, which on macOS is its native Metal runtime when the GPU
+/// supports Metal 3. With the fork's native-MSL preset, wgpu matched it on a
+/// real capture and was faster on small scenes.
+pub const RUNTIME_ENV: &str = "BRUSH_RUNTIME";
+
+/// wgpu, unless [`RUNTIME_ENV`] asks for `CubeCL`'s choice: on macOS the
+/// native Metal runtime if the GPU supports it, else wgpu.
+fn unregistered_default_device() -> ProcessDevice {
+    if cfg!(target_os = "macos")
+        && cubecl_runtime_requested(std::env::var(RUNTIME_ENV).ok().as_deref())
+    {
+        burn::cubecl::Device::default().into()
+    } else {
+        WgpuDevice::default().into()
+    }
+}
+
+fn cubecl_runtime_requested(value: Option<&str>) -> bool {
+    match value.map(str::trim) {
+        None | Some("") => false,
+        Some(value) if value.eq_ignore_ascii_case("wgpu") => false,
+        Some(value)
+            if value.eq_ignore_ascii_case("auto") || value.eq_ignore_ascii_case("metal") =>
+        {
+            true
+        }
+        Some(value) => {
+            log::warn!("Ignoring {RUNTIME_ENV}={value:?}; expected `wgpu`, `auto` or `metal`");
+            false
+        }
+    }
+}
+
+fn is_wgpu_device(device: &ProcessDevice) -> bool {
+    matches!(
+        device.as_dispatch(),
+        burn::backend::DispatchDevice::Cube(burn::cubecl::Device::Wgpu(_))
+    )
 }
 
 /// Git-derived identifier for the source used to build Brush.
@@ -55,22 +97,31 @@ fn burn_options() -> RuntimeOptions {
 ///
 /// Its own device, separate from anything the viewer owns, so training never
 /// contends with GUI work on the same queue. wgpu needs an explicit setup so
-/// the adapter and limits are chosen before any kernel runs.
+/// the adapter and limits are chosen before any kernel runs; the native Metal
+/// runtime, when [`RUNTIME_ENV`] selects it, configures itself on first use.
 async fn open_device() -> RegisteredDevice {
     let started = web_time::Instant::now();
     log::info!("GPU initialization started");
-    let setup =
-        burn_wgpu::init_setup_async::<DefaultGraphicsApi>(&WgpuDevice::default(), burn_options())
-            .await;
-    log::info!(
-        "GPU initialized in {:.3}s: {:?}",
-        started.elapsed().as_secs_f64(),
-        setup.adapter.get_info(),
-    );
-    RegisteredDevice {
-        burn: WgpuDevice::default().into(),
-        host: None,
+    let burn = unregistered_default_device();
+    if is_wgpu_device(&burn) {
+        let setup = burn_wgpu::init_setup_async::<DefaultGraphicsApi>(
+            &WgpuDevice::default(),
+            burn_options(),
+        )
+        .await;
+        log::info!(
+            "GPU initialized in {:.3}s: {:?}",
+            started.elapsed().as_secs_f64(),
+            setup.adapter.get_info(),
+        );
+    } else {
+        log::info!(
+            "GPU selected in {:.3}s: {:?}",
+            started.elapsed().as_secs_f64(),
+            burn.as_dispatch(),
+        );
     }
+    RegisteredDevice { burn, host: None }
 }
 
 /// Open the compute device now, rather than waiting for the first thing that
@@ -220,7 +271,8 @@ pub fn device_memory_cleanup(device: &ProcessDevice) {
 /// Retains the `CubeCL` return type for callers of this compatibility helper.
 pub fn device_memory_usage(device: &ProcessDevice) -> Option<burn::cubecl::MemoryUsage> {
     device
-        .memory_pool_usage()
+        .measure_memory()
+        .map(|report| report.usage)
         .map(|usage| burn::cubecl::MemoryUsage {
             number_allocs: usage.number_allocs,
             bytes_in_use: usage.bytes_in_use,
@@ -248,6 +300,22 @@ pub fn try_device() -> Option<&'static burn::tensor::Device> {
 /// current lazy-initialization behavior.
 pub async fn wait_for_device() -> ProcessDevice {
     burn_init_setup().await
+}
+
+#[cfg(test)]
+mod runtime_selection_tests {
+    use super::cubecl_runtime_requested;
+
+    #[test]
+    fn wgpu_is_the_default_and_auto_or_metal_opt_in() {
+        assert!(!cubecl_runtime_requested(None));
+        for value in ["", "wgpu", "WGPU", " wgpu ", "vulkan", "cuda"] {
+            assert!(!cubecl_runtime_requested(Some(value)), "{value:?}");
+        }
+        for value in ["auto", "AUTO", " auto ", "metal", "Metal"] {
+            assert!(cubecl_runtime_requested(Some(value)), "{value:?}");
+        }
+    }
 }
 
 #[cfg(test)]

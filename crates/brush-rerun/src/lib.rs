@@ -1,10 +1,11 @@
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[cfg(all(feature = "rerun", not(target_family = "wasm")))]
+#[cfg(rerun)]
 pub mod burn_to_rerun;
 
-// visualize_tools has a noop implementation for WASM or without Rerun.
+// visualize_tools has a noop implementation where rerun isn't built: on wasm,
+// on mobile, or without the `rerun` feature.
 pub mod visualize_tools;
 
 #[derive(Clone, Args, Serialize, Deserialize)]

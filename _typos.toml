@@ -1,7 +1,3 @@
-[files]
-# Keep the pinned MCAP dependency's upstream Rust sources and API spellings.
-extend-exclude = ["vendor/mcap/**/*.rs"]
-
 [default.extend-words]
 # Crate name, not a misspelling of "flat".
 flate = "flate"

@@ -376,13 +376,12 @@ async fn run_cli_ui_with_progress(
                     let masked = avg_masked_psnr
                         .zip(avg_masked_ssim)
                         .zip(mean_mask_coverage)
-                        .map(|((psnr, ssim), coverage)| {
+                        .map_or_default(|((psnr, ssim), coverage)| {
                             format!(
                                 ", masked PSNR {psnr:.2}, masked SSIM {ssim:.3} ({:.1}% coverage)",
                                 coverage * 100.0
                             )
-                        })
-                        .unwrap_or_default();
+                        });
                     eval_spinner.set_message(format!(
                         "Eval iter {iter}: PSNR {avg_psnr:.2}, SSIM {avg_ssim:.3}{masked}"
                     ));
@@ -623,10 +622,9 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(
+        std::assert_matches!(
             &cli.source,
-            Some(DataSource::Path(p)) if p == "some/dataset/path"
-        ));
+            Some(DataSource::Path(p)) if p == "some/dataset/path");
         // Passing a source flips the viewer default off.
         assert!(!cli.with_viewer);
 
@@ -645,10 +643,9 @@ mod tests {
     #[test]
     fn parses_url_source() {
         let cli = Cli::try_parse_from(["brush-cli", "https://example.com/data.zip"]).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             &cli.source,
-            Some(DataSource::Url(u)) if u == "https://example.com/data.zip"
-        ));
+            Some(DataSource::Url(u)) if u == "https://example.com/data.zip");
     }
 
     #[test]

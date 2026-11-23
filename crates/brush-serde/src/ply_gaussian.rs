@@ -146,5 +146,8 @@ mod tests {
 
         assert_eq!(min, -4.0);
         assert_eq!(max, 4.0);
+        // A coefficient of 0 is stored as 128, which must decode close to 0.
+        let mid = de_quant_sh(U8Deserializer::<ValueError>::new(128)).unwrap();
+        assert!(mid.abs() < 0.02);
     }
 }

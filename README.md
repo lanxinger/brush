@@ -67,7 +67,7 @@ https://github.com/user-attachments/assets/f679fec0-935d-4dd2-87e1-c301db9cdc2c
 While training, additional data can be visualized with the excellent [rerun](https://rerun.io/). To install rerun on your machine, please follow their [instructions](https://rerun.io/docs/getting-started/installing-viewer). Open the ./brush_blueprint.rbl in the viewer for best results.
 
 ## Building Brush
-First install rust 1.88+. You can run tests with `cargo test --all`. Brush uses the wonderful [rerun](https://rerun.io/) for additional visualizations while training, run `cargo install rerun-cli` if you want to use it.
+First install Rust 1.100+. You can run tests with `cargo test --all`. Brush uses the wonderful [rerun](https://rerun.io/) for additional visualizations while training, run `cargo install rerun-cli` if you want to use it.
 
 ### Windows/macOS/Linux
 Use `cargo run --release` from the workspace root to make an optimized build. Use `cargo run` to run a debug build.
@@ -93,6 +93,20 @@ cargo build --release --no-default-features
 build them with `--features native-msl` when appropriate. On non-Metal backends
 the feature continues to use WGSL. The compiler choice applies to the whole
 binary, so compare WGSL and MSL with separate builds.
+
+Training runs on wgpu by default, using the compiler selected at build time.
+Upstream Brush trains on CubeCL's native Metal runtime on macOS instead. With
+this fork's optimizations the two matched on Mip-NeRF 360 garden, and native
+Metal was slower on small scenes (see
+[docs/upstream-2026-11-23.md](docs/upstream-2026-11-23.md)). To try it, set
+`BRUSH_RUNTIME=auto` (or `metal`). CubeCL then uses native Metal when the GPU
+supports Metal 3, and wgpu otherwise. Native Metal always compiles MSL, so
+there the `native-msl` feature only gates the training optimizations described
+below. The viewer and other platforms stay on wgpu.
+
+```sh
+BRUSH_RUNTIME=auto ./target/release/brush
+```
 
 The runtime preset requests all six retained native-MSL training optimizations.
 An explicit environment value still overrides the Apple Silicon default. For

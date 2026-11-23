@@ -309,7 +309,7 @@ async fn imported_inner_splats_receive_training_gradients() {
 #[wasm_bindgen_test(unsupported = test)]
 fn test_batch_generation() {
     let batch = generate_test_batch((256, 128));
-    let img_dims = batch.img_packed.shape.as_slice();
+    let img_dims = batch.img_packed.shape().as_slice();
     assert_eq!(img_dims, &[128, 256]);
     let img_data = batch.img_packed.try_into_vec::<i32>().unwrap();
     assert_eq!(img_data.len(), 128 * 256);
