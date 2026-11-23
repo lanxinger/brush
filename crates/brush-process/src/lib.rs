@@ -19,7 +19,8 @@ pub fn default_device() -> ProcessDevice {
 
 /// Training runs on wgpu by default. Set to `auto` (or `metal`) to let `CubeCL`
 /// pick instead, which on macOS is its native Metal runtime when the GPU
-/// supports Metal 3. The fork's native-MSL preset measured faster on wgpu.
+/// supports Metal 3. With the fork's native-MSL preset, wgpu matched it on a
+/// real capture and was faster on small scenes.
 pub const RUNTIME_ENV: &str = "BRUSH_RUNTIME";
 
 /// wgpu, unless [`RUNTIME_ENV`] asks for `CubeCL`'s choice: on macOS the

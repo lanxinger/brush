@@ -95,8 +95,9 @@ the feature continues to use WGSL. The compiler choice applies to the whole
 binary, so compare WGSL and MSL with separate builds.
 
 Training runs on wgpu by default, using the compiler selected at build time.
-Upstream Brush trains on CubeCL's native Metal runtime on macOS instead; with
-this fork's optimizations that runtime measured slower in local tests (see
+Upstream Brush trains on CubeCL's native Metal runtime on macOS instead. With
+this fork's optimizations the two matched on Mip-NeRF 360 garden, and native
+Metal was slower on small scenes (see
 [docs/upstream-2026-11-23.md](docs/upstream-2026-11-23.md)). To try it, set
 `BRUSH_RUNTIME=auto` (or `metal`). CubeCL then uses native Metal when the GPU
 supports Metal 3, and wgpu otherwise. Native Metal always compiles MSL, so
