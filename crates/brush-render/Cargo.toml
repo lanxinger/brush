@@ -28,8 +28,6 @@ tracing.workspace = true
 log.workspace = true
 bytemuck.workspace = true
 
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
-
 [features]
 debug-validation = []
 # Keep the fork's public feature name while routing compiler selection through
@@ -37,11 +35,15 @@ debug-validation = []
 native-msl = ["brush-cube/metal"]
 raster-census = ["dep:serde_json"]
 
-# CubeCL emits WGSL by default on every platform. The native-msl feature opts
-# the macOS Metal backend into CubeCL's MSL compiler; other backends still use
-# WGSL.
+# CubeCL's wgpu runtime emits WGSL by default on every platform. The
+# native-msl feature opts wgpu's macOS Metal backend into CubeCL's MSL
+# compiler; other backends still use WGSL. macOS training can opt into the
+# separate native CubeCL Metal runtime (`BRUSH_RUNTIME=auto`, see brush-process),
+# which always compiles MSL; native-msl still gates the fork's training
+# optimizations there.
 [dev-dependencies]
 assert_approx_eq.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 wasm-bindgen-test = "0.3"
 
 [target.'cfg(target_family = "wasm")'.dev-dependencies]

@@ -132,7 +132,8 @@ pub fn bounds_from_pos(percentile: f32, means: &[f32]) -> BoundingBox {
         .as_chunks::<3>()
         .0
         .iter()
-        .map(|chunk| (chunk[0], chunk[1], chunk[2]))
+        .copied()
+        .map(<(f32, f32, f32)>::from)
         .collect();
     x_vals.retain(|x| x.is_finite());
     y_vals.retain(|y| y.is_finite());
@@ -319,7 +320,8 @@ mod tests {
             .as_chunks::<3>()
             .0
             .iter()
-            .map(|chunk| (chunk[0], chunk[1], chunk[2]))
+            .copied()
+            .map(<(f32, f32, f32)>::from)
             .collect();
         x_vals.retain(|x| x.is_finite());
         y_vals.retain(|y| y.is_finite());

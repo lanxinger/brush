@@ -1,16 +1,16 @@
 #![allow(unused_imports)]
 
 pub struct VisualizeTools {
-    #[cfg(all(feature = "rerun", not(target_family = "wasm")))]
+    #[cfg(rerun)]
     rec: rerun::RecordingStream,
     /// Tracks which eval view indices have had their GT image logged. GT
     /// images never change, so we log them once as static instead of paying
     /// the full readback + send cost every eval iter.
-    #[cfg(all(feature = "rerun", not(target_family = "wasm")))]
+    #[cfg(rerun)]
     gt_logged: std::sync::Mutex<std::collections::HashSet<u32>>,
 }
 
-#[cfg(all(feature = "rerun", not(target_family = "wasm")))]
+#[cfg(rerun)]
 mod visualize_tools_impl {
     use std::sync::Arc;
 
@@ -331,7 +331,7 @@ mod visualize_tools_impl {
                         ),
                     )?;
                     self.rec.log_static(
-                        path.clone(),
+                        path,
                         &rerun::Transform3D::from_translation_rotation(
                             view.camera.position,
                             view.camera.rotation,
@@ -387,7 +387,7 @@ mod visualize_tools_impl {
             // Read the rendered f32 tensor and convert straight to u8 RGB,
             // skipping the intermediate Rgb32FImage allocation.
             let data = eval.rendered.clone().into_data_async().await?;
-            let [h, w, c] = [data.shape[0], data.shape[1], data.shape[2]];
+            let [h, w, c] = [data.shape()[0], data.shape()[1], data.shape()[2]];
             assert!(
                 c == 3,
                 "Expected 3-channel eval render, got {c} (would need updating to log alpha)"
@@ -729,7 +729,7 @@ mod visualize_tools_impl {
     }
 }
 
-#[cfg(any(not(feature = "rerun"), target_family = "wasm"))]
+#[cfg(not(rerun))]
 mod visualize_tools_impl {
     use std::sync::Arc;
 

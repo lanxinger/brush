@@ -547,16 +547,6 @@ pub struct TileBbox {
     pub max_y: u32,
 }
 
-/// 2D pixel bbox as a rect (min/max corners in pixel coords).
-#[derive(CubeType, Copy, Clone)]
-#[expand(derive(Clone, Copy))]
-pub struct PixelRect {
-    pub min_x: f32,
-    pub min_y: f32,
-    pub max_x: f32,
-    pub max_y: f32,
-}
-
 /// f32-atomic-add abstraction: a single kernel covers both the native
 /// `Atomic<f32>::fetch_add` path and the `Atomic<u32>` CAS-over-bit-pattern
 /// fallback. Hosts pick the impl from [`supports_float_atomics`]. Shared by

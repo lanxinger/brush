@@ -176,7 +176,8 @@ mod native {
     }
 
     fn share_packed(data: TensorData) -> TensorData {
-        TensorData::from_bytes(data.bytes.shared(), data.shape, data.dtype)
+        let (bytes, shape, dtype) = data.into_parts();
+        TensorData::from_bytes(bytes.shared(), shape, dtype)
     }
 
     async fn load_checkpoint(

@@ -192,15 +192,12 @@ pub(crate) async fn train_stream(
         .enumerate()
         .map(|(index, view)| (view.image.path().to_path_buf(), index))
         .collect();
-    let eval_train_indices: Vec<Option<usize>> = eval_scene
-        .as_ref()
-        .map(|eval| {
-            eval.views
-                .iter()
-                .map(|view| train_indices.get(view.image.path()).copied())
-                .collect()
-        })
-        .unwrap_or_default();
+    let eval_train_indices: Vec<Option<usize>> = eval_scene.as_ref().map_or_default(|eval| {
+        eval.views
+            .iter()
+            .map(|view| train_indices.get(view.image.path()).copied())
+            .collect()
+    });
 
     let mut train_duration = Duration::from_secs(0);
     let mut dataloader = SceneLoader::new(
@@ -556,7 +553,12 @@ pub(crate) async fn train_stream(
             if rerun_config.rerun_enabled
                 && (iter.is_multiple_of(rerun_config.rerun_log_train_stats_every) || is_last_step)
             {
-                visualize.log_memory(iter, &device.memory_pool_usage().unwrap_or_default())?;
+                visualize.log_memory(
+                    iter,
+                    &device
+                        .measure_memory()
+                        .map_or_default(|report| report.usage),
+                )?;
             }
 
             if refine.num_added > 0 {

@@ -152,7 +152,8 @@ pub fn project_forward_kernel(
         mean2d_x,
         mean2d_y,
         conic,
-        power_threshold,
+        ex,
+        ey,
         tile_width,
         tile_height,
     );

@@ -17,14 +17,8 @@ use wasm_bindgen_test::wasm_bindgen_test;
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 fn pack_rgba(bytes: &[u8]) -> Vec<u32> {
-    bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|p| {
-            u32::from(p[0]) | u32::from(p[1]) << 8 | u32::from(p[2]) << 16 | u32::from(p[3]) << 24
-        })
-        .collect()
+    let (pixels, _) = bytes.as_chunks::<4>();
+    pixels.iter().map(|&p| u32::from_le_bytes(p)).collect()
 }
 
 /// Deterministic u8 pattern (avoids RNG so the test is reproducible across
@@ -36,9 +30,8 @@ fn make_pattern(h: usize, w: usize, scale: u32, offset: u32) -> Vec<u8> {
 }
 
 fn pred_from_bytes(bytes: &[u8], h: usize, w: usize, device: &Device) -> Tensor<3> {
-    let rgb: Vec<f32> = bytes
-        .as_chunks::<4>()
-        .0
+    let (pixels, _) = bytes.as_chunks::<4>();
+    let rgb: Vec<f32> = pixels
         .iter()
         .flat_map(|p| [p[0], p[1], p[2]].map(|b| b as f32 / 255.0))
         .collect();

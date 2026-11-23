@@ -13,6 +13,7 @@ use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 
 #[repr(C)]
+#[derive(Debug)]
 pub enum TrainExitCode {
     Success = 0,
     Error = 1,

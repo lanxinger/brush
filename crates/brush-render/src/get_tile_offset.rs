@@ -22,7 +22,7 @@ pub fn get_tile_offsets(
     let base_id = workgroup_base + UNIT_POS;
 
     // `tile_id_from_isect` can contain the sentinel `num_tiles` produced by
-    // `map_gaussians_to_intersect` whenever its predicate yields fewer hits
+    // `map_gaussians_to_intersect` whenever its tile walk yields fewer hits
     // than PF reserved (separate optimisation passes). `tile_offsets` is sized
     // for valid tiles only, so we must gate every write on `tid < num_tiles` to
     // avoid stomping the slot one past the end.

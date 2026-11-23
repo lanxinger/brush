@@ -6,10 +6,9 @@ readme.workspace = true
 license.workspace = true
 
 [features]
-native-msl = ["brush-render/native-msl"]
+native-msl = ["dep:brush-render", "brush-render/native-msl"]
 
 [dependencies]
-brush-render.path = "../brush-render"
 brush-cube.path = "../brush-cube"
 
 burn = { workspace = true, features = ["autodiff"] }
@@ -17,6 +16,10 @@ burn-cubecl.workspace = true
 burn-fusion.workspace = true
 glam.workspace = true
 tracing.workspace = true
+
+# Only the Apple Silicon native-MSL path reads brush-render's option switches.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+brush-render = { path = "../brush-render", optional = true }
 
 [dev-dependencies]
 brush-cube = { path = "../brush-cube" }
